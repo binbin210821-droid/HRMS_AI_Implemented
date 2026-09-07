@@ -1,0 +1,10 @@
+-r requirements.txt
+black
+isort
+pytest-cov
+httpx
+ruff
+mypy
+types-python-jose
+boto3-stubs[s3]
+websockets

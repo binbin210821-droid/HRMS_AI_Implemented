@@ -1,0 +1,196 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  color: #0f172a;
+  background: #f8fafc;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #f8fafc;
+}
+
+@layer base {
+  h1 {
+    @apply text-h1;
+  }
+
+  h2 {
+    @apply text-h2;
+  }
+
+  h3 {
+    @apply text-h3;
+  }
+
+  p {
+    @apply text-body;
+  }
+}
+
+@layer components {
+  .primary-button {
+    @apply rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .secondary-button {
+    @apply rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50;
+  }
+
+  .form-input {
+    @apply block w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
+  }
+
+  .table-action {
+    @apply ml-3 text-sm font-semibold text-brand-600 hover:text-brand-800;
+  }
+
+  .table-action-danger {
+    @apply text-red-600 hover:text-red-800;
+  }
+
+  .status-active,
+  .status-inactive {
+    @apply inline-flex rounded-full px-2.5 py-1 text-xs font-semibold;
+  }
+
+  .status-active {
+    @apply bg-emerald-50 text-emerald-700;
+  }
+
+  .status-inactive {
+    @apply bg-slate-100 text-slate-600;
+  }
+
+  .status-danger,
+  .priority-low,
+  .priority-medium,
+  .priority-high,
+  .task-status-todo,
+  .task-status-in_progress,
+  .task-status-done,
+  .task-status-overdue {
+    @apply inline-flex rounded-md px-2 py-1 text-xs font-semibold;
+  }
+
+  .status-danger,
+  .priority-high {
+    @apply bg-red-100 text-red-700;
+  }
+
+  .priority-medium {
+    @apply bg-amber-100 text-amber-700;
+  }
+
+  .task-status-in_progress {
+    @apply bg-sky-100 text-sky-700;
+  }
+
+  .priority-low,
+  .task-status-todo {
+    @apply bg-slate-100 text-slate-700;
+  }
+
+  .task-status-done {
+    @apply bg-emerald-700 text-white;
+  }
+
+  .task-status-overdue {
+    @apply bg-red-100 text-red-700;
+  }
+
+  .task-event-chip {
+    @apply flex w-full min-w-0 flex-col items-start gap-0.5 text-left transition hover:brightness-95;
+  }
+
+  .calendar-day-cell {
+    @apply relative min-h-[140px] cursor-pointer border-b border-l border-slate-200 bg-white p-2 transition hover:bg-brand-50/30;
+  }
+
+  .calendar-day-outside {
+    @apply bg-slate-50/70;
+  }
+
+  .calendar-day-today {
+    @apply z-10 ring-2 ring-inset ring-brand-500;
+  }
+
+  .calendar-day-overdue {
+    @apply bg-red-50/50;
+  }
+
+  .notification-bell-icon {
+    animation: notification-bell-ring 2.8s ease-in-out infinite;
+    transform-origin: 50% 15%;
+  }
+
+  .notification-reminder {
+    animation: notification-reminder 10s ease-in-out forwards;
+  }
+}
+
+@keyframes notification-bell-ring {
+  0%,
+  72%,
+  100% {
+    transform: rotate(0deg);
+  }
+
+  76% {
+    transform: rotate(9deg);
+  }
+
+  80% {
+    transform: rotate(-9deg);
+  }
+
+  84% {
+    transform: rotate(6deg);
+  }
+
+  88% {
+    transform: rotate(-4deg);
+  }
+
+  92% {
+    transform: rotate(2deg);
+  }
+}
+
+@keyframes notification-reminder {
+  0% {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+
+  12%,
+  82% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notification-bell-icon,
+  .notification-reminder {
+    animation: none;
+  }
+}

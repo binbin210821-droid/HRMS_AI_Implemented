@@ -1,0 +1,677 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+
+import { FadeIn } from '../components/animations/index.js'
+import MainLayout from '../components/layout/MainLayout.jsx'
+import Modal from '../components/Modal.jsx'
+import { useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { listDepartments } from '../features/departments/departmentsApi.js'
+import { listEmployees } from '../features/employees/employeesApi.js'
+import CalendarView from '../features/tasks/components/CalendarView.jsx'
+import LeadershipTasksOverview from '../features/tasks/LeadershipTasksOverview.jsx'
+import ManagerTaskDirectives from '../features/tasks/ManagerTaskDirectives.jsx'
+import { createTask, deleteTask, listTasks, updateTask } from '../features/tasks/tasksApi.js'
+import { useAuthStore } from '../stores/authStore.js'
+
+const STATUS_LABELS = {
+  todo: 'Chưa bắt đầu',
+  in_progress: 'Đang thực hiện',
+  done: 'Đã hoàn thành',
+}
+
+function getTaskStatusPresentation(task) {
+  const isOverdue = task.is_overdue && task.status !== 'done'
+
+  return {
+    className: isOverdue ? 'task-status-overdue' : `task-status-${task.status}`,
+    label: isOverdue ? 'Quá hạn' : STATUS_LABELS[task.status],
+  }
+}
+
+const PRIORITY_LABELS = { low: 'Thấp', medium: 'Trung bình', high: 'Cao' }
+
+const emptyForm = {
+  title: '',
+  description: '',
+  employee_id: '',
+  due_date: '',
+  priority: 'medium',
+  status: 'todo',
+  subtasks: '',
+}
+
+function TasksPage() {
+  const role = useAuthStore((state) => state.role)
+  return role === 'leadership' ? <LeadershipTasksOverview /> : <ManagerTasksPage />
+}
+
+function ManagerTasksPage() {
+  const { role } = useAuthStore()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [tasks, setTasks] = useState([])
+  const [employees, setEmployees] = useState([])
+  const [departments, setDepartments] = useState([])
+  const [filters, setFilters] = useState({
+    search: '',
+    employeeId: role === 'leadership' ? '' : searchParams.get('employee_id') || '',
+    departmentId: role === 'leadership' ? searchParams.get('department_id') || '' : '',
+    status: searchParams.get('status') || '',
+    deadline: searchParams.get('deadline') || 'all',
+  })
+  const [form, setForm] = useState(emptyForm)
+  const [modal, setModal] = useState(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [viewMode, setViewMode] = useState('list')
+  const isLeadership = role === 'leadership'
+
+  useEffect(() => {
+    setFilters((current) => ({
+      ...current,
+      employeeId: role === 'leadership' ? '' : searchParams.get('employee_id') || '',
+      departmentId: role === 'leadership' ? searchParams.get('department_id') || '' : '',
+      status: searchParams.get('status') || '',
+      deadline: searchParams.get('deadline') || 'all',
+    }))
+  }, [role, searchParams])
+
+  const departmentMap = useMemo(
+    () => Object.fromEntries(departments.map((department) => [department.id, department.name])),
+    [departments],
+  )
+
+  const visibleTasks = useMemo(() => {
+    const search = filters.search.trim().toLocaleLowerCase('vi-VN')
+    return tasks.filter((task) => {
+      const matchesSearch =
+        !search ||
+        [task.title, task.employee_name, task.employee_code]
+          .filter(Boolean)
+          .some((value) => value.toLocaleLowerCase('vi-VN').includes(search))
+      const matchesEmployee =
+        isLeadership || !filters.employeeId || task.employee_id === filters.employeeId
+      const matchesDepartment =
+        !isLeadership || !filters.departmentId || task.department_id === filters.departmentId
+      const matchesStatus = !filters.status || task.status === filters.status
+      const matchesDeadline =
+        filters.deadline === 'all' ||
+        (filters.deadline === 'overdue' && task.is_overdue) ||
+        (filters.deadline === 'upcoming' && !task.is_overdue && task.status !== 'done')
+      return (
+        matchesSearch && matchesEmployee && matchesDepartment && matchesStatus && matchesDeadline
+      )
+    })
+  }, [filters, isLeadership, tasks])
+
+  const summary = useMemo(
+    () => ({
+      total: tasks.length,
+      unfinished: tasks.filter((task) => task.status !== 'done').length,
+      overdue: tasks.filter((task) => task.is_overdue).length,
+      completed: tasks.filter((task) => task.status === 'done').length,
+    }),
+    [tasks],
+  )
+
+  async function loadData() {
+    setIsLoading(true)
+    setError('')
+    try {
+      const [taskData, employeeData, departmentData] = await Promise.all([
+        listTasks(),
+        listEmployees(),
+        listDepartments(),
+      ])
+      setTasks(taskData)
+      setEmployees(employeeData)
+      setDepartments(departmentData)
+    } catch (requestError) {
+      setError(requestError.message || 'Không thể tải danh sách công việc.')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  async function refreshTasks() {
+    try {
+      setTasks(await listTasks())
+    } catch (requestError) {
+      setError(requestError.message || 'Không thể cập nhật công việc mới.')
+    }
+  }
+
+  useRealtimeUpdates('tasks', handleRealtimeTaskChange)
+
+  function handleRealtimeTaskChange(message) {
+    const data = message.data || {}
+    const taskId = data._id
+    if (!taskId) return
+
+    if (message.operation === 'delete') {
+      setTasks((currentTasks) => currentTasks.filter((task) => task.id !== taskId))
+      void refreshTasks()
+      return
+    }
+
+    const employee = employees.find((item) => item.id === data.employee_id)
+    if (!employee) {
+      void refreshTasks()
+      return
+    }
+
+    const status = data.status || 'todo'
+    const task = {
+      id: taskId,
+      title: data.title || 'Công việc mới',
+      description: data.description || null,
+      subtasks: data.subtasks || [],
+      employee_id: data.employee_id,
+      employee_name: employee.full_name,
+      employee_code: employee.employee_code,
+      department_id: data.department_id || employee.department_id,
+      priority: data.priority || 'medium',
+      status,
+      due_date: toDateOnly(data.due_date),
+      is_overdue: status !== 'done' && isPastDate(data.due_date),
+      completed_at: data.completed_at || null,
+    }
+    setTasks((currentTasks) => {
+      const exists = currentTasks.some((item) => item.id === task.id)
+      return exists
+        ? currentTasks.map((item) => (item.id === task.id ? { ...item, ...task } : item))
+        : [task, ...currentTasks]
+    })
+    void refreshTasks()
+  }
+
+  useEffect(() => {
+    loadData()
+  }, [])
+
+  function openCreate(dueDate = '') {
+    setForm({ ...emptyForm, employee_id: employees[0]?.id || '', due_date: dueDate })
+    setModal({ mode: 'create' })
+    setError('')
+  }
+
+  const openEdit = useCallback((task) => {
+    setForm({
+      title: task.title,
+      description: task.description || '',
+      employee_id: task.employee_id,
+      due_date: task.due_date,
+      priority: task.priority,
+      status: task.status,
+      subtasks: (task.subtasks || []).join('\n'),
+    })
+    setModal({ mode: 'edit', task })
+    setError('')
+  }, [])
+
+  useEffect(() => {
+    const taskId = searchParams.get('task')
+    if (isLoading || !taskId) return
+
+    const task = tasks.find((item) => item.id === taskId)
+    if (!task) return
+
+    openEdit(task)
+    const nextSearchParams = new URLSearchParams(searchParams)
+    nextSearchParams.delete('task')
+    setSearchParams(nextSearchParams, { replace: true })
+  }, [isLoading, openEdit, searchParams, setSearchParams, tasks])
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    setIsSaving(true)
+    setError('')
+    const payload = {
+      ...form,
+      subtasks: form.subtasks
+        .split('\n')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    }
+    try {
+      if (modal.mode === 'create') await createTask(payload)
+      else await updateTask(modal.task.id, payload)
+      setModal(null)
+      await loadData()
+    } catch (requestError) {
+      setError(requestError.message || 'Không thể lưu công việc.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  async function handleDelete(task) {
+    if (!window.confirm(`Xóa công việc “${task.title}” của ${task.employee_name}?`)) return
+    setError('')
+    try {
+      await deleteTask(task.id)
+      await loadData()
+    } catch (requestError) {
+      setError(requestError.message || 'Không thể xóa công việc.')
+    }
+  }
+
+  async function handleTaskDateChange(task, dueDate) {
+    const previousTasks = tasks
+    setTasks((currentTasks) =>
+      currentTasks.map((item) =>
+        item.id === task.id
+          ? {
+              ...item,
+              due_date: dueDate,
+              is_overdue: item.status !== 'done' && isPastDate(dueDate),
+            }
+          : item,
+      ),
+    )
+    try {
+      await updateTask(task.id, { due_date: dueDate })
+      await refreshTasks()
+    } catch (requestError) {
+      setTasks(previousTasks)
+      setError(requestError.message || 'Không thể cập nhật deadline.')
+    }
+  }
+
+  return (
+    <MainLayout>
+      <FadeIn className="mx-auto max-w-7xl">
+        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="!text-caption !font-semibold !uppercase !tracking-wider !text-brand-600">
+                Theo dõi tiến độ
+              </p>
+              <h1 className="mt-2 text-slate-900">Công việc & deadline</h1>
+              <p className="mt-2 text-ink-600">
+                {isLeadership
+                  ? 'Theo dõi công việc và hạn hoàn thành của nhân viên trên toàn công ty.'
+                  : 'Quản lý công việc của nhân viên trong phòng ban của bạn.'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <div
+                className="flex rounded-xl bg-slate-100 p-1"
+                role="group"
+                aria-label="Chế độ xem công việc"
+              >
+                <button
+                  type="button"
+                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${viewMode === 'list' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+                  onClick={() => setViewMode('list')}
+                >
+                  Danh sách
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${viewMode === 'calendar' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+                  onClick={() => setViewMode('calendar')}
+                >
+                  Lịch
+                </button>
+              </div>
+              <button type="button" className="primary-button" onClick={() => openCreate()}>
+                + Thêm công việc
+              </button>
+            </div>
+          </div>
+
+          {error && <p className="mt-5 rounded-lg bg-red-50 p-3 !text-sm !text-red-700">{error}</p>}
+
+          <ManagerTaskDirectives tasks={tasks} />
+
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <SummaryCard label="Tổng công việc" value={summary.total} tone="blue" />
+            <SummaryCard label="Chưa hoàn thành" value={summary.unfinished} tone="amber" />
+            <SummaryCard label="Đang quá hạn" value={summary.overdue} tone="red" />
+            <SummaryCard label="Đã hoàn thành" value={summary.completed} tone="green" />
+          </div>
+
+          <div className="mt-6 grid gap-3 rounded-xl bg-slate-50 p-4 md:grid-cols-[1.5fr_1fr_1fr_1fr]">
+            <label className="text-sm font-medium text-slate-700">
+              Tìm công việc hoặc nhân viên
+              <input
+                className="form-input mt-1"
+                placeholder="Nhập từ khóa..."
+                value={filters.search}
+                onChange={(event) => setFilters({ ...filters, search: event.target.value })}
+              />
+            </label>
+            {isLeadership ? (
+              <SelectFilter
+                label="Phòng ban"
+                value={filters.departmentId}
+                onChange={(departmentId) => setFilters({ ...filters, departmentId })}
+              >
+                <option value="">Tất cả phòng ban</option>
+                {departments.map((department) => (
+                  <option key={department.id} value={department.id}>
+                    {department.name}
+                  </option>
+                ))}
+              </SelectFilter>
+            ) : (
+              <SelectFilter
+                label="Nhân viên"
+                value={filters.employeeId}
+                onChange={(employeeId) => setFilters({ ...filters, employeeId })}
+              >
+                <option value="">Tất cả nhân viên</option>
+                {employees.map((employee) => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.full_name}
+                  </option>
+                ))}
+              </SelectFilter>
+            )}
+            <SelectFilter
+              label="Trạng thái"
+              value={filters.status}
+              onChange={(status) => setFilters({ ...filters, status })}
+            >
+              <option value="">Tất cả trạng thái</option>
+              {Object.entries(STATUS_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </SelectFilter>
+            <SelectFilter
+              label="Hạn hoàn thành"
+              value={filters.deadline}
+              onChange={(deadline) => setFilters({ ...filters, deadline })}
+            >
+              <option value="all">Tất cả thời hạn</option>
+              <option value="overdue">Đang quá hạn</option>
+              <option value="upcoming">Chưa đến hạn</option>
+            </SelectFilter>
+          </div>
+
+          {viewMode === 'list' ? (
+            <div className="mt-6 overflow-x-auto">
+              <table className="w-full min-w-[1100px] text-left text-sm">
+                <thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="px-4 py-3">Công việc</th>
+                    <th className="px-4 py-3">Người phụ trách</th>
+                    <th className="px-4 py-3">Phòng ban</th>
+                    <th className="px-4 py-3">Hạn hoàn thành</th>
+                    <th className="px-4 py-3">Ưu tiên</th>
+                    <th className="px-4 py-3">Trạng thái</th>
+                    <th className="px-4 py-3 text-right">Thao tác</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {isLoading && (
+                    <tr>
+                      <td colSpan="7" className="px-4 py-8 text-center text-slate-500">
+                        Đang tải...
+                      </td>
+                    </tr>
+                  )}
+                  {!isLoading && visibleTasks.length === 0 && (
+                    <tr>
+                      <td colSpan="7" className="px-4 py-8 text-center text-slate-500">
+                        Chưa có công việc phù hợp.
+                      </td>
+                    </tr>
+                  )}
+                  {!isLoading &&
+                    visibleTasks.map((task) => (
+                      <tr key={task.id} className="hover:bg-slate-50">
+                        <td className="max-w-[280px] px-4 py-4">
+                          <p className="font-semibold text-slate-900">{task.title}</p>
+                          {task.description && (
+                            <p className="mt-1 line-clamp-2 text-slate-500">{task.description}</p>
+                          )}
+                          {task.subtasks?.length > 0 && (
+                            <p className="mt-1 text-xs text-slate-400">
+                              {task.subtasks.length} việc con
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-4 py-4">
+                          <p className="font-medium text-slate-900">{task.employee_name}</p>
+                          <p className="text-xs text-slate-500">{task.employee_code}</p>
+                        </td>
+                        <td className="px-4 py-4 text-slate-600">
+                          {departmentMap[task.department_id] || '—'}
+                        </td>
+                        <td className="px-4 py-4">
+                          <span
+                            className={
+                              task.is_overdue ? 'font-semibold text-red-600' : 'text-slate-600'
+                            }
+                          >
+                            {formatDate(task.due_date)}
+                          </span>
+                          {task.is_overdue && <span className="ml-2 status-danger">Quá hạn</span>}
+                        </td>
+                        <td className="px-4 py-4">
+                          <span className={`priority-${task.priority}`}>
+                            {PRIORITY_LABELS[task.priority]}
+                          </span>
+                        </td>
+                        <td className="px-4 py-4">
+                          {(() => {
+                            const statusPresentation = getTaskStatusPresentation(task)
+
+                            return (
+                              <span className={statusPresentation.className}>
+                                {statusPresentation.label}
+                              </span>
+                            )
+                          })()}
+                        </td>
+                        <td className="px-4 py-4 text-right whitespace-nowrap">
+                          <button
+                            type="button"
+                            className="table-action"
+                            onClick={() => openEdit(task)}
+                          >
+                            Sửa
+                          </button>
+                          <button
+                            type="button"
+                            className="table-action table-action-danger"
+                            onClick={() => handleDelete(task)}
+                          >
+                            Xóa
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <CalendarView
+              tasks={visibleTasks}
+              onTaskClick={openEdit}
+              onEmptyDayClick={openCreate}
+              onTaskDrop={handleTaskDateChange}
+            />
+          )}
+        </section>
+      </FadeIn>
+
+      {modal && (
+        <Modal
+          title={modal.mode === 'create' ? 'Thêm công việc' : 'Sửa công việc'}
+          description="Gán công việc cho đúng nhân viên và theo dõi hạn hoàn thành."
+          onClose={() => setModal(null)}
+        >
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            <FormField
+              label="Tên công việc"
+              value={form.title}
+              onChange={(title) => setForm({ ...form, title })}
+              required
+            />
+            <label className="block text-sm font-medium text-slate-700">
+              Mô tả
+              <textarea
+                className="form-input mt-1 min-h-20"
+                value={form.description}
+                onChange={(event) => setForm({ ...form, description: event.target.value })}
+              />
+            </label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <SelectField
+                label="Người phụ trách"
+                value={form.employee_id}
+                onChange={(employee_id) => setForm({ ...form, employee_id })}
+                required
+              >
+                <option value="">Chọn nhân viên</option>
+                {employees.map((employee) => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.full_name} ({employee.employee_code})
+                  </option>
+                ))}
+              </SelectField>
+              <FormField
+                label="Hạn hoàn thành"
+                type="date"
+                value={form.due_date}
+                onChange={(due_date) => setForm({ ...form, due_date })}
+                required
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <SelectField
+                label="Mức ưu tiên"
+                value={form.priority}
+                onChange={(priority) => setForm({ ...form, priority })}
+              >
+                {Object.entries(PRIORITY_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </SelectField>
+              <SelectField
+                label="Trạng thái"
+                value={form.status}
+                onChange={(status) => setForm({ ...form, status })}
+              >
+                {Object.entries(STATUS_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </SelectField>
+            </div>
+            <label className="block text-sm font-medium text-slate-700">
+              Việc con <span className="font-normal text-slate-400">(mỗi dòng một việc)</span>
+              <textarea
+                className="form-input mt-1 min-h-24"
+                value={form.subtasks}
+                onChange={(event) => setForm({ ...form, subtasks: event.target.value })}
+                placeholder="Ví dụ: Kiểm tra tài liệu"
+              />
+            </label>
+            <div className="flex justify-end gap-3 pt-3">
+              <button type="button" className="secondary-button" onClick={() => setModal(null)}>
+                Hủy
+              </button>
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={isSaving || !employees.length}
+              >
+                {isSaving ? 'Đang lưu...' : 'Lưu công việc'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </MainLayout>
+  )
+}
+
+function SummaryCard({ label, value, tone }) {
+  const styles = {
+    blue: 'bg-blue-50 text-blue-700',
+    amber: 'bg-amber-50 text-amber-700',
+    red: 'bg-red-50 text-red-700',
+    green: 'bg-emerald-50 text-emerald-700',
+  }
+  return (
+    <div className={`rounded-xl p-4 ${styles[tone]}`}>
+      <p className="!text-sm font-medium">{label}</p>
+      <p className="mt-2 text-2xl font-bold">{value}</p>
+    </div>
+  )
+}
+
+function SelectFilter({ label, value, onChange, children }) {
+  return (
+    <label className="text-sm font-medium text-slate-700">
+      {label}
+      <select
+        className="form-input mt-1"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {children}
+      </select>
+    </label>
+  )
+}
+
+function SelectField({ label, value, onChange, required = false, children }) {
+  return (
+    <label className="block text-sm font-medium text-slate-700">
+      {label}
+      <select
+        className="form-input mt-1"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        required={required}
+      >
+        {children}
+      </select>
+    </label>
+  )
+}
+
+function FormField({ label, value, onChange, required = false, type = 'text' }) {
+  return (
+    <label className="block text-sm font-medium text-slate-700">
+      {label}
+      <input
+        className="form-input mt-1"
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        required={required}
+      />
+    </label>
+  )
+}
+
+function formatDate(value) {
+  if (!value) return '—'
+  const [year, month, day] = value.split('-').map(Number)
+  return new Intl.DateTimeFormat('vi-VN', { dateStyle: 'medium' }).format(
+    new Date(year, month - 1, day),
+  )
+}
+
+function toDateOnly(value) {
+  return value ? String(value).slice(0, 10) : ''
+}
+
+function isPastDate(value) {
+  const dateValue = toDateOnly(value)
+  if (!dateValue) return false
+  return dateValue < new Date().toISOString().slice(0, 10)
+}
+
+export default TasksPage

@@ -1,0 +1,25 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.runtime/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/test-results/
+
+# IDE and OS
+.idea/
+.vscode/*.code-workspace
+.DS_Store
+Thumbs.db

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="680" viewBox="0 0 1000 680">
+  <rect width="1000" height="680" rx="40" fill="#F8FAFC"/>
+  <text x="70" y="80" font-family="Inter,Arial,sans-serif" font-size="34" font-weight="700" fill="#1E293B">WorkMind Icon System</text>
+  <text x="70" y="116" font-family="Inter,Arial,sans-serif" font-size="18" fill="#64748B">Human-centered HRMS · 24px rounded icon family</text>
+  <g font-family="Inter,Arial,sans-serif">
+    <g transform="translate(70 160)"><rect width="400" height="130" rx="26" fill="#fff"/><image href="icons/dashboard.svg" x="34" y="28" width="72" height="72"/><text x="125" y="57" font-size="22" font-weight="650" fill="#1E293B">Tổng quan</text><text x="125" y="86" font-size="16" fill="#64748B">Dashboard tổng hợp</text></g>
+    <g transform="translate(530 160)"><rect width="400" height="130" rx="26" fill="#fff"/><image href="icons/performance.svg" x="34" y="28" width="72" height="72"/><text x="125" y="57" font-size="22" font-weight="650" fill="#1E293B">Hiệu suất nhân viên</text><text x="125" y="86" font-size="16" fill="#64748B">Tăng trưởng cá nhân</text></g>
+    <g transform="translate(70 315)"><rect width="400" height="130" rx="26" fill="#fff"/><image href="icons/alert.svg" x="34" y="28" width="72" height="72"/><text x="125" y="57" font-size="22" font-weight="650" fill="#1E293B">Cảnh báo</text><text x="125" y="86" font-size="16" fill="#64748B">Ngưỡng cần chú ý</text></g>
+    <g transform="translate(530 315)"><rect width="400" height="130" rx="26" fill="#fff"/><image href="icons/employees.svg" x="34" y="28" width="72" height="72"/><text x="125" y="57" font-size="22" font-weight="650" fill="#1E293B">Nhân viên &amp; phòng ban</text><text x="125" y="86" font-size="16" fill="#64748B">Con người và kết nối</text></g>
+    <g transform="translate(70 470)"><rect width="400" height="130" rx="26" fill="#fff"/><image href="icons/tasks.svg" x="34" y="28" width="72" height="72"/><text x="125" y="57" font-size="22" font-weight="650" fill="#1E293B">Công việc &amp; deadline</text><text x="125" y="86" font-size="16" fill="#64748B">Tiến độ và thời hạn</text></g>
+    <g transform="translate(530 470)"><rect width="400" height="130" rx="26" fill="#EFF6FF"/><image href="icons/ai-assistant.svg" x="34" y="28" width="72" height="72"/><text x="125" y="57" font-size="22" font-weight="650" fill="#1D4ED8">Trợ lý AI</text><text x="125" y="86" font-size="16" fill="#64748B">AI hỗ trợ con người</text></g>
+  </g>
+</svg>
