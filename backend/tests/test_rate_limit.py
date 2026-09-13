@@ -730,6 +730,7 @@ def test_contract_policy_uses_explicit_groups_and_health_bypass() -> None:
     settings = make_settings(
         rate_limit_default=120,
         rate_limit_read_heavy=None,
+        rate_limit_heavy_read=None,
         rate_limit_directive=None,
         rate_limit_upload_session=None,
         rate_limit_upload_completion=None,
@@ -740,7 +741,8 @@ def test_contract_policy_uses_explicit_groups_and_health_bypass() -> None:
 
     assert policy.rule_for_group("read_light").limit == 120
     assert policy.rule_for_group("read_operational").limit == 120
-    assert policy.rule_for_group("read_heavy").limit == settings.rate_limit_heavy_read
+    # A group without an explicit quota falls back to the shared default.
+    assert policy.rule_for_group("read_heavy").limit == settings.rate_limit_default
     assert policy.rule_for_group("directive_action").limit == 120
     assert policy.is_bypassed("health") is True
     assert policy.rule_for_group("health").limit == 0
