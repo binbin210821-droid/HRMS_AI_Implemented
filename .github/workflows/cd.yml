@@ -84,4 +84,4 @@ jobs:
           BACKEND_IMAGE: ${{ env.IMAGE_NAMESPACE }}/hrms-backend:${{ github.sha }}
           FRONTEND_IMAGE: ${{ env.IMAGE_NAMESPACE }}/hrms-frontend:${{ github.sha }}
         run: |
-          ssh "$SSH_USER@$SSH_HOST" "cd '$DEPLOY_PATH' && BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' docker compose -f docker-compose.production.yml pull && BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' docker compose -f docker-compose.production.yml up -d --remove-orphans && curl --fail --retry 12 --retry-delay 5 http://127.0.0.1/api/health"
+          ssh "$SSH_USER@$SSH_HOST" "cd '$DEPLOY_PATH' && BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' docker compose -f docker-compose.production.yml pull && BACKEND_IMAGE='$BACKEND_IMAGE' FRONTEND_IMAGE='$FRONTEND_IMAGE' docker compose -f docker-compose.production.yml up -d --remove-orphans && curl --fail --retry 12 --retry-all-errors --retry-delay 5 --max-time 15 http://127.0.0.1/api/health
