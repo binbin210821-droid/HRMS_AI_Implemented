@@ -107,7 +107,7 @@ jobs:
           exit 1
 
       - name: UI E2E smoke
-        run: npm run test:e2e
+        run: npx playwright test e2e/ui-only-smoke.spec.js e2e/ui-only-role-smoke.spec.js
 
       - name: Upload Playwright artifacts on failure
         if: failure()
@@ -119,6 +119,138 @@ jobs:
             frontend/playwright-report
             /tmp/hrms-frontend-preview.log
           if-no-files-found: ignore
+
+  live-e2e:
+    name: Frontend live E2E
+    runs-on: ubuntu-latest
+    env:
+      MONGO_URI: mongodb://127.0.0.1:27017/hrms_e2e?replicaSet=rs0
+      DATABASE_NAME: hrms_e2e
+      REDIS_URL: redis://127.0.0.1:6379/15
+      RATE_LIMIT_BACKEND: redis
+      IDEMPOTENCY_ENABLED: "true"
+      CORS_ORIGINS: http://127.0.0.1:5173
+      VITE_DEV_API_ORIGIN: http://127.0.0.1:8000
+      STORAGE_BUCKET: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Start CI dependencies
+        run: |
+          docker compose -f docker-compose.ci.yml up -d mongodb redis
+          docker compose -f docker-compose.ci.yml run --rm mongodb-init
+          for attempt in {1..30}; do
+            if docker compose -f docker-compose.ci.yml exec -T mongodb mongosh --quiet --eval "rs.status().myState" | grep -q '^1$'; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then exit 1; fi
+            sleep 1
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Seed E2E data
+        working-directory: backend
+        run: |
+          python scripts/seed_base_data.py --password DemoPassword123! --employees-per-department 5
+          python scripts/seed_performance_data.py --days 60
+          python scripts/seed_tasks_data.py
+          python scripts/seed_task_execution_reports.py
+
+      - name: Start backend
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 \
+            > /tmp/hrms-backend-e2e.log 2>&1 &
+          for attempt in {1..60}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8000/api/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend did not become ready after 60 seconds."
+          cat /tmp/hrms-backend-e2e.log
+          exit 1
+
+      - name: Prepare alert data
+        working-directory: backend
+        run: |
+          python scripts/smoke_early_warning.py --base-url http://127.0.0.1:8000
+          python scripts/smoke_overload.py --base-url http://127.0.0.1:8000
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Start preview server
+        working-directory: frontend
+        run: |
+          nohup npm run preview -- --host 127.0.0.1 --port 5173 \
+            > /tmp/hrms-frontend-live-e2e.log 2>&1 &
+
+      - name: Wait for preview
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:5173/; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Frontend preview did not become ready after 30 seconds."
+          cat /tmp/hrms-frontend-live-e2e.log
+          exit 1
+
+      - name: Run live E2E
+        working-directory: frontend
+        run: npx playwright test e2e/phase3-5.spec.js
+
+      - name: Collect live E2E logs
+        if: failure()
+        run: |
+          cat /tmp/hrms-backend-e2e.log || true
+          cat /tmp/hrms-frontend-live-e2e.log || true
+          docker compose -f docker-compose.ci.yml logs --no-color
+
+      - name: Upload live E2E artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-e2e-artifacts
+          path: |
+            frontend/test-results
+            frontend/playwright-report
+            /tmp/hrms-backend-e2e.log
+            /tmp/hrms-frontend-live-e2e.log
+          if-no-files-found: ignore
+
+      - name: Stop CI dependencies
+        if: always()
+        run: docker compose -f docker-compose.ci.yml down -v --remove-orphans
 
   integration:
     name: MongoDB and Redis integration
@@ -176,7 +308,7 @@ jobs:
 
   container-build:
     name: Container build
-    needs: [backend-quality, frontend-quality, integration]
+    needs: [backend-quality, frontend-quality, live-e2e, integration]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

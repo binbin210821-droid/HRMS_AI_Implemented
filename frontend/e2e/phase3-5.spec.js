@@ -179,7 +179,7 @@ test('Leadership xem màn hình đánh giá phòng ban theo tuần', async ({ pa
   await expect(page.getByRole('heading', { name: 'Lịch sử đánh giá tuần' })).toBeVisible()
 })
 
-test('E2E luồng chính từ nhập điểm đến đồ thị, cảnh báo và Trợ lý AI', async ({ page }) => {
+test('E2E luồng chính từ nhập điểm đến đồ thị và cảnh báo', async ({ page }) => {
   await login(page, 'demo.manager', '/manager')
 
   await page.getByRole('link', { name: 'Hiệu suất nhân viên' }).click()
@@ -191,14 +191,6 @@ test('E2E luồng chính từ nhập điểm đến đồ thị, cảnh báo và
   await expect(page.getByRole('heading', { name: 'Bảng tổng quan hiệu suất' })).toBeVisible()
   await page.getByRole('link', { name: 'Cảnh báo ngưỡng bất lợi' }).click()
   await expect(page.getByRole('heading', { name: 'Cảnh báo hiệu suất' })).toBeVisible()
-
-  await page.goto('/manager')
-  await page.getByRole('button', { name: 'Mở Trợ lý AI' }).click()
-  await page.getByLabel('Câu hỏi cho Trợ lý AI').fill('Tóm tắt tình hình phòng ban của tôi')
-  await page.getByRole('button', { name: 'Gửi' }).click()
-  await expect(page.getByLabel('Trợ lý AI').getByText(/Trợ lý AI hiện chưa sẵn sàng/)).toBeVisible({
-    timeout: 15_000,
-  })
 })
 
 test('production build không chặn request vận hành khi chuyển trang và nhận realtime', async ({

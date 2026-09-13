@@ -299,61 +299,13 @@ test('UI-only giữ redirect trang chủ và trang không có quyền', async ({
   ).toEqual([])
 })
 
-test('UI-only Trợ lý AI có thao tác header và nhập liệu dễ nhận biết', async ({ page }) => {
-  const { requests, consoleErrors } = await installReadOnlyApi(page, 'manager')
-  await page.goto('/manager')
-  await page.getByRole('button', { name: 'Mở Trợ lý AI' }).click()
-
-  const panel = page.locator('section[aria-label="Trợ lý AI"]')
-  await expect(panel).toBeVisible()
-  await expect(panel.getByRole('button', { name: 'Bắt đầu cuộc trò chuyện mới' })).toHaveClass(
-    /bg-white/,
-  )
-  await expect(panel.getByRole('button', { name: 'Đóng Trợ lý AI' })).toHaveClass(
-    /h-9.*w-9.*text-white/,
-  )
-  await expect(panel.getByLabel('Câu hỏi cho Trợ lý AI')).toBeVisible()
-  await expect(panel.getByRole('button', { name: 'Gửi' })).toBeDisabled()
-
-  expect(
-    requests.filter(
-      ({ method, url }) =>
-        method !== 'GET' && method !== 'HEAD' && !url.includes('/api/v1/ai/chat/stream'),
-    ),
-  ).toEqual([])
-  expect(
-    consoleErrors.filter(
-      (message) =>
-        !message.startsWith('Failed to load resource:') &&
-        !message.includes("WebSocket connection to 'ws://127.0.0.1:5173/ws/realtime' failed"),
-    ),
-  ).toEqual([])
-  await page.screenshot({
-    path: '../docs/review/ui-baseline-ai-assistant.png',
-    animations: 'disabled',
-  })
-})
-
-test('UI-only Trợ lý AI giữ phiên khi chuyển trang và đóng mở lại', async ({ page }) => {
+test('UI-only Trợ lý AI vẫn được ẩn sau khi tạm hoãn tính năng', async ({ page }) => {
   const { consoleErrors } = await installReadOnlyApi(page, 'manager')
   await page.goto('/manager')
-  await page.getByRole('button', { name: 'Mở Trợ lý AI' }).click()
 
-  const panel = page.locator('section[aria-label="Trợ lý AI"]')
-  await page.getByLabel('Câu hỏi cho Trợ lý AI').fill('Ai cần được theo dõi?')
-  await panel.getByRole('button', { name: 'Gửi' }).click()
-  await expect(panel.getByText('Tổng quan: Có 1 nhân viên.')).toBeVisible()
-
-  await page.getByRole('link', { name: 'Công việc' }).first().click()
-  await expect(page).toHaveURL(/\/manager\/tasks$/)
-  await expect(panel).toBeVisible()
-  await expect(panel.getByText('Tổng quan: Có 1 nhân viên.')).toBeVisible()
-
-  await panel.getByRole('button', { name: 'Đóng Trợ lý AI' }).click()
-  await expect(panel).not.toBeVisible()
-  await page.getByRole('button', { name: 'Mở Trợ lý AI' }).click()
-  await expect(panel).toBeVisible()
-  await expect(panel.getByText('Tổng quan: Có 1 nhân viên.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Mở Trợ lý AI' })).toHaveCount(0)
+  await expect(page.locator('section[aria-label="Trợ lý AI"]')).toHaveCount(0)
+  await expect(page.getByRole('link', { name: 'Trợ lý AI' })).toHaveCount(0)
 
   expect(
     consoleErrors.filter(

@@ -11,7 +11,8 @@ Tag vX.Y.Z  -> push image lên GHCR -> chờ duyệt Environment production -> d
 ## Các workflow trong repository
 
 - `.github/workflows/ci.yml`: Ruff, Mypy, compile, pytest, kiểm tra contract, frontend
-  lint/format/test/build, UI E2E, MongoDB Replica Set + Redis integration và build thử image.
+  lint/format/test/build, UI-only E2E, live E2E có backend + dữ liệu seed, MongoDB Replica Set +
+  Redis integration và build thử image.
 - `.github/workflows/security.yml`: Dependency Review trên Pull Request và CodeQL định kỳ.
 - `.github/workflows/cd.yml`: build/push hai image lên GHCR và deploy production có approval.
 
@@ -32,7 +33,8 @@ Tag vX.Y.Z  -> push image lên GHCR -> chờ duyệt Environment production -> d
 6. Vào `Settings -> Actions -> General`, cho phép workflow dùng Actions cần thiết và giữ
    `GITHUB_TOKEN` ở quyền tối thiểu.
 7. Vào `Settings -> Rules -> Rulesets` hoặc branch protection của `main`, bắt buộc các check:
-   `Backend quality`, `Frontend quality`, `MongoDB and Redis integration`, `Container build`.
+   `Backend quality`, `Frontend quality`, `Frontend live E2E`, `MongoDB and Redis integration`,
+   `Container build`.
 
 ## Chuẩn bị máy production
 
