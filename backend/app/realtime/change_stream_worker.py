@@ -129,12 +129,24 @@ class TasksChangeStreamWorker:
     async def _watch_tasks(self, stop_event: asyncio.Event) -> None:
         database = self.database_provider()
         try:
-            await database.command(
-                {
-                    "collMod": "tasks",
-                    "changeStreamPreAndPostImages": {"enabled": True},
-                }
-            )
+            # `collMod` cannot configure a collection that does not exist yet.
+            # Create the collection with pre-images enabled for a fresh database;
+            # keep the command path for test doubles and existing collections.
+            if hasattr(database, "list_collection_names"):
+                collection_names = await database.list_collection_names()
+            else:
+                collection_names = None
+            if collection_names is not None and "tasks" not in collection_names:
+                await database.create_collection(
+                    "tasks", changeStreamPreAndPostImages={"enabled": True}
+                )
+            else:
+                await database.command(
+                    {
+                        "collMod": "tasks",
+                        "changeStreamPreAndPostImages": {"enabled": True},
+                    }
+                )
         except PyMongoError:
             logger.warning(
                 "Không bật được pre-image cho tasks; sự kiện xóa trực tiếp có thể thiếu scope"

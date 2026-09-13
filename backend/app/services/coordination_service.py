@@ -9,8 +9,10 @@ from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.core.config import get_settings
+from app.core.pagination import Page
 from app.core.time import BusinessClock
 from app.events.event_bus import COORDINATION_APPLIED, EventBus, event_bus
+from app.models.alert import AlertDocument
 from app.models.coordination import (
     AcknowledgeDepartmentAlertDirectiveRequest,
     ApplyCoordinationRequest,
@@ -24,10 +26,8 @@ from app.models.coordination import (
     DepartmentAlertDirectiveDocument,
     DepartmentAlertDirectiveResponse,
     DepartmentAlertDirectiveStatus,
-    DirectiveTargetResponse,
     FulfillDirectiveRequest,
     IssueDepartmentAlertDirectiveRequest,
-    IssueDirectiveRequest,
     ReviewDepartmentAlertDirectiveRequest,
     SubmitDepartmentAlertDirectiveRequest,
 )
@@ -60,6 +60,18 @@ class CoordinationService:
     ) -> list[CoordinationSuggestionResponse]:
         await self.repository.ensure_indexes()
         alerts = await self.repository.list_alerts(scope)
+        return await self._suggestions_for_alerts(alerts)
+
+    async def list_suggestions_page(
+        self, scope: ObjectId | None, offset: int, limit: int
+    ) -> Page[CoordinationSuggestionResponse]:
+        await self.repository.ensure_indexes()
+        page = await self.repository.list_alerts_page(scope, offset, limit)
+        return Page(items=await self._suggestions_for_alerts(page.items), total=page.total)
+
+    async def _suggestions_for_alerts(
+        self, alerts: list[AlertDocument]
+    ) -> list[CoordinationSuggestionResponse]:
         if not alerts:
             return []
         plans_by_alert = await self.repository.find_plans([alert.id for alert in alerts])
@@ -95,28 +107,8 @@ class CoordinationService:
         current_user_id: str,
         request: ApplyCoordinationRequest,
     ) -> CoordinationPlanResponse:
-        if scope is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Lãnh đạo không trực tiếp áp dụng điều phối, vui lòng dùng chức năng ra chỉ thị",
-            )
-        object_id = self._parse_object_id(alert_id, "Mã cảnh báo")
+        alert = await self.get_open_alert(alert_id, scope)
         await self.repository.ensure_indexes()
-        alert = await self.repository.find_alert(object_id)
-        if alert is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy cảnh báo"
-            )
-        if scope is not None and alert.department_id != scope:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Bạn không có quyền điều phối ngoài phòng ban",
-            )
-        if alert.status.value != "open":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Cảnh báo đã được xử lý, không thể tạo phương án điều phối mới",
-            )
         if await self.repository.find_plan(alert.id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -167,15 +159,16 @@ class CoordinationService:
             "created_at": now,
             "updated_at": now,
         }
-        try:
-            plan = await self.repository.insert_plan(plan_document)
+        async def persist(session: Any | None) -> CoordinationPlanDocument:
+            plan = await self._repository_call("insert_plan", plan_document, session=session)
             resolution_note = (
                 f"Đã áp dụng điều phối: chuyển {transfer_count} công việc cho "
                 f"{target.employee_name}."
             )
             if request.note and request.note.strip():
                 resolution_note = f"{resolution_note} Ghi chú: {request.note.strip()}"
-            await self.repository.insert_audit_log(
+            await self._repository_call(
+                "insert_audit_log",
                 {
                     "action": "workload_coordination_applied",
                     "actor_id": plan.created_by,
@@ -186,16 +179,23 @@ class CoordinationService:
                     "tasks_to_transfer": plan.tasks_to_transfer,
                     "mode": plan.mode.value,
                     "created_at": now,
-                }
+                },
+                session=session,
             )
-            resolved_alert = await self.repository.resolve_alert_for_coordination(
+            resolved_alert = await self._repository_call(
+                "resolve_alert_for_coordination",
                 alert.id,
                 plan.created_by,
                 resolution_note,
                 now,
+                session=session,
             )
             if resolved_alert is None or resolved_alert.status.value != "resolved":
                 raise PyMongoError("Không thể cập nhật trạng thái cảnh báo sau khi điều phối")
+            return plan
+
+        try:
+            plan = await self._run_write_transaction(persist)
         except DuplicateKeyError as error:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -214,60 +214,40 @@ class CoordinationService:
         await self.bus.publish(COORDINATION_APPLIED, plan)
         return await self._plan_response(plan)
 
-    async def list_directive_targets(
-        self, alert_id: str, current_user_id: str
-    ) -> list[DirectiveTargetResponse]:
-        del current_user_id  # Authorization is enforced by the router dependency.
-        if self.department_repository is None:
-            raise RuntimeError("Chưa cấu hình repository phòng ban cho chỉ thị điều phối")
+    async def get_open_alert(self, alert_id: str, scope: ObjectId | None) -> AlertDocument:
+        """Return one open alert after applying the same scope checks as mutations."""
 
+        if scope is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Lãnh đạo không trực tiếp xử lý cảnh báo của Manager",
+            )
         object_id = self._parse_object_id(alert_id, "Mã cảnh báo")
         alert = await self.repository.find_alert(object_id)
         if alert is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy cảnh báo"
             )
-        source_department = await self.department_repository.find_by_id(alert.department_id)
-        if source_department is None:
+        if alert.department_id != scope:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy phòng ban nguồn"
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Bạn không có quyền xử lý cảnh báo ngoài phòng ban",
             )
-        if not source_department.specialty:
+        if alert.status.value != "open":
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Phòng ban chưa được gán chuyên môn",
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cảnh báo đã được xử lý, không thể tạo đề xuất mới",
             )
+        return alert
 
-        target_departments = await self.department_repository.find_by_specialty(
-            source_department.specialty, exclude_id=source_department.id
+    async def get_rebalance_candidates_for_alert(
+        self, alert_id: str, scope: ObjectId | None
+    ) -> tuple[AlertDocument, list[WorkloadCandidateResponse]]:
+        alert = await self.get_open_alert(alert_id, scope)
+        candidates = await self.repository.find_rebalance_candidates(
+            alert.department_id, self._alert_date(alert), alert.employee_id
         )
-        capacity_by_department = await self.repository.count_rebalance_capacity_by_department(
-            [department.id for department in target_departments], self._alert_date(alert)
-        )
-        return sorted(
-            [
-                DirectiveTargetResponse(
-                    department_id=str(department.id),
-                    department_name=department.name,
-                    available_employee_count=capacity_by_department.get(str(department.id), 0),
-                )
-                for department in target_departments
-            ],
-            key=lambda target: target.available_employee_count,
-            reverse=True,
-        )
-
-    async def issue_directive(
-        self,
-        alert_id: str,
-        current_user_id: str,
-        request: IssueDirectiveRequest,
-    ) -> CoordinationDirectiveResponse:
-        del alert_id, current_user_id, request
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Luồng chỉ thị theo cảnh báo cá nhân đã được thay thế bằng chỉ thị cấp phòng ban",
-        )
+        return alert, candidates
 
     async def list_directives(
         self, scope: ObjectId | None, directive_status: str | None = None
@@ -275,6 +255,22 @@ class CoordinationService:
         await self.repository.ensure_indexes()
         directives = await self.repository.list_directives(scope, directive_status)
         return [await self._directive_response(directive) for directive in directives]
+
+    async def list_directives_page(
+        self,
+        scope: ObjectId | None,
+        directive_status: str | None,
+        offset: int,
+        limit: int,
+    ) -> Page[CoordinationDirectiveResponse]:
+        await self.repository.ensure_indexes()
+        page = await self.repository.list_directives_page(
+            scope, directive_status, offset, limit
+        )
+        return Page(
+            items=[await self._directive_response(directive) for directive in page.items],
+            total=page.total,
+        )
 
     async def list_directive_candidates(
         self, directive_id: str, scope: ObjectId | None
@@ -307,6 +303,39 @@ class CoordinationService:
             )
         return await self.repository.find_rebalance_candidates(
             scope, self._alert_date(alert), alert.employee_id
+        )
+
+    async def list_directive_candidates_page(
+        self, directive_id: str, scope: ObjectId | None, offset: int, limit: int
+    ) -> Page[WorkloadCandidateResponse]:
+        if scope is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Lãnh đạo không trực tiếp tiếp nhận chỉ thị điều phối",
+            )
+        object_id = self._parse_object_id(directive_id, "Mã chỉ thị điều phối")
+        directive = await self.repository.find_directive(object_id)
+        if directive is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy chỉ thị điều phối"
+            )
+        if directive.target_department_id != scope:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Bạn không có quyền xem ứng viên của phòng ban khác",
+            )
+        if directive.status != CoordinationDirectiveStatus.PENDING:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Chỉ thị điều phối đã được tiếp nhận",
+            )
+        alert = await self.repository.find_alert(directive.alert_id)
+        if alert is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy cảnh báo liên quan"
+            )
+        return await self.repository.find_rebalance_candidates_page(
+            scope, self._alert_date(alert), alert.employee_id, offset, limit
         )
 
     async def fulfill_directive(
@@ -384,13 +413,14 @@ class CoordinationService:
             "created_at": now,
             "updated_at": now,
         }
-        try:
-            plan = await self.repository.insert_plan(plan_document)
+        async def persist(session: Any | None) -> CoordinationPlanDocument:
+            plan = await self._repository_call("insert_plan", plan_document, session=session)
             resolution_note = (
                 f"Đã tiếp nhận chỉ thị điều phối: chuyển {transfer_count} công việc cho "
                 f"{target.employee_name}."
             )
-            await self.repository.insert_audit_log(
+            await self._repository_call(
+                "insert_audit_log",
                 {
                     "action": "cross_department_coordination_fulfilled",
                     "actor_id": plan.created_by,
@@ -402,20 +432,35 @@ class CoordinationService:
                     "tasks_to_transfer": plan.tasks_to_transfer,
                     "mode": plan.mode.value,
                     "created_at": now,
-                }
+                },
+                session=session,
             )
-            resolved_alert = await self.repository.resolve_alert_for_coordination(
-                alert.id, plan.created_by, resolution_note, now
+            resolved_alert = await self._repository_call(
+                "resolve_alert_for_coordination",
+                alert.id,
+                plan.created_by,
+                resolution_note,
+                now,
+                session=session,
             )
             if resolved_alert is None or resolved_alert.status.value != "resolved":
                 raise PyMongoError(
                     "Không thể cập nhật trạng thái cảnh báo sau khi tiếp nhận chỉ thị"
                 )
-            fulfilled = await self.repository.mark_directive_fulfilled(
-                directive.id, plan.id, manager_id, now
+            fulfilled = await self._repository_call(
+                "mark_directive_fulfilled",
+                directive.id,
+                plan.id,
+                manager_id,
+                now,
+                session=session,
             )
             if fulfilled is None or fulfilled.status != CoordinationDirectiveStatus.FULFILLED:
                 raise PyMongoError("Không thể cập nhật trạng thái chỉ thị điều phối")
+            return plan
+
+        try:
+            plan = await self._run_write_transaction(persist)
         except DuplicateKeyError as error:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -434,12 +479,52 @@ class CoordinationService:
         await self.bus.publish(COORDINATION_APPLIED, plan)
         return await self._plan_response(plan)
 
+    async def _run_write_transaction(self, operation: Callable[[Any | None], Any]) -> Any:
+        """Run a coordination write set atomically when Mongo supports sessions.
+
+        Test repositories without a Mongo client keep the same service contract and
+        execute the operation directly. Production repositories always expose the
+        Motor client, so plan, audit, alert and directive state commit together.
+        """
+
+        client = getattr(self.repository, "client", None)
+        if client is None:
+            return await operation(None)
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                return await operation(session)
+
+    async def _repository_call(self, method_name: str, *args: Any, session: Any | None) -> Any:
+        method = getattr(self.repository, method_name)
+        if session is None:
+            return await method(*args)
+        return await method(*args, session=session)
+
     async def list_department_directives(
         self, scope: ObjectId | None, directive_status: str | None = None
     ) -> list[DepartmentAlertDirectiveResponse]:
         await self.repository.ensure_indexes()
         directives = await self.repository.list_department_directives(scope, directive_status)
         return [await self._department_directive_response(directive) for directive in directives]
+
+    async def list_department_directives_page(
+        self,
+        scope: ObjectId | None,
+        directive_status: str | None,
+        offset: int,
+        limit: int,
+    ) -> Page[DepartmentAlertDirectiveResponse]:
+        await self.repository.ensure_indexes()
+        page = await self.repository.list_department_directives_page(
+            scope, directive_status, offset, limit
+        )
+        return Page(
+            items=[
+                await self._department_directive_response(directive)
+                for directive in page.items
+            ],
+            total=page.total,
+        )
 
     async def issue_department_directive(
         self,
@@ -922,6 +1007,13 @@ class CoordinationService:
             if target is not None:
                 target_name = target.name
         alert = await self.repository.find_alert(directive.alert_id)
+        fulfilled_by_name = None
+        if directive.fulfilled_by:
+            find_user = getattr(self.repository, "find_user", None)
+            if find_user is not None:
+                fulfilled_by_user = await find_user(directive.fulfilled_by)
+                if fulfilled_by_user is not None:
+                    fulfilled_by_name = fulfilled_by_user.full_name
         return CoordinationDirectiveResponse(
             id=str(directive.id),
             alert_id=str(directive.alert_id),
@@ -939,6 +1031,7 @@ class CoordinationService:
                 str(directive.fulfilled_plan_id) if directive.fulfilled_plan_id else None
             ),
             fulfilled_by=str(directive.fulfilled_by) if directive.fulfilled_by else None,
+            fulfilled_by_name=fulfilled_by_name,
             fulfilled_at=directive.fulfilled_at,
         )
 

@@ -1,22 +1,26 @@
 from datetime import date as Date
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 
 from bson import ObjectId
 from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
+from app.core.pagination import Page
 from app.core.time import BusinessClock
 from app.events.event_bus import PERFORMANCE_METRIC_CREATED, event_bus
 from app.models.performance import (
     CompanyPerformanceAnalyticsResponse,
     DepartmentPerformanceAnalyticsResponse,
     DepartmentPerformanceComparison,
+    DepartmentWeeklyPerformanceTrendResponse,
     EmployeePerformanceAnalyticsResponse,
     EmployeePerformanceComparison,
     PerformanceMetricCreate,
     PerformanceMetricDocument,
     PerformanceMetricResponse,
     PerformanceTrendPoint,
+    WeeklyPerformanceTrendPoint,
 )
 from app.repositories.performance_repository import PerformanceRepository
 from app.services.department_service import parse_object_id
@@ -81,6 +85,32 @@ class PerformanceService:
             scope, requested_employee, requested_department, start_date, end_date
         )
         return [self._response(document) for document in documents]
+
+    async def list_page(
+        self,
+        scope: ObjectId | None,
+        employee_id: str | None,
+        department_id: str | None,
+        start_date: Date | None,
+        end_date: Date | None,
+        offset: int,
+        limit: int,
+    ) -> Page[PerformanceMetricResponse]:
+        self._validate_date_range(start_date, end_date)
+        requested_employee = parse_object_id(employee_id, "Mã nhân viên") if employee_id else None
+        requested_department = (
+            parse_object_id(department_id, "Mã phòng ban") if department_id else None
+        )
+        page = await self.repository.find_many_page(
+            scope,
+            requested_employee,
+            requested_department,
+            start_date,
+            end_date,
+            offset,
+            limit,
+        )
+        return Page(items=[self._response(document) for document in page.items], total=page.total)
 
     async def employee_analytics(
         self,
@@ -189,6 +219,62 @@ class PerformanceService:
             for department in departments
         ]
         return CompanyPerformanceAnalyticsResponse(departments=comparisons)
+
+    async def department_weekly_trend(
+        self,
+        scope: ObjectId | None,
+        department_id: str,
+        start_date: Date | None = None,
+        end_date: Date | None = None,
+    ) -> DepartmentWeeklyPerformanceTrendResponse:
+        self._validate_date_range(start_date, end_date)
+        requested_department = parse_object_id(department_id, "Mã phòng ban")
+        if scope is not None and requested_department != scope:
+            raise self._forbidden_scope("Bạn không có quyền xem dữ liệu phòng ban khác")
+        department = await self.repository.find_department(requested_department)
+        if department is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy phòng ban"
+            )
+
+        aggregate = await self.repository.aggregate_weekly_average(
+            requested_department, start_date, end_date
+        )
+        weeks: list[WeeklyPerformanceTrendPoint] = []
+        for value in aggregate.get("weeks", []):
+            week_start = value.get("_id")
+            if isinstance(week_start, datetime):
+                week_start = week_start.date()
+            performance = value.get("performance")
+            if week_start is None or performance is None:
+                continue
+            quality = value.get("quality")
+            weeks.append(
+                WeeklyPerformanceTrendPoint(
+                    week_start=week_start,
+                    week_label=week_start.strftime("%d/%m"),
+                    performance=float(
+                        Decimal(str(performance)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+                    ),
+                    quality=(
+                        float(
+                            Decimal(str(quality)).quantize(
+                                Decimal("0.1"), rounding=ROUND_HALF_UP
+                            )
+                        )
+                        if quality is not None
+                        else None
+                    ),
+                )
+            )
+
+        overall_average = aggregate.get("overall_average")
+        return DepartmentWeeklyPerformanceTrendResponse(
+            department_id=str(department.id),
+            department_name=department.name,
+            weeks=weeks,
+            overall_average=(float(overall_average) if overall_average is not None else None),
+        )
 
     async def create_daily(
         self,

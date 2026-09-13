@@ -3,6 +3,7 @@ from bson.errors import InvalidId
 from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
+from app.core.pagination import Page
 from app.core.time import BusinessClock
 from app.models.department import (
     DepartmentCreate,
@@ -42,6 +43,18 @@ class DepartmentService:
 
     async def list(self, scope: ObjectId | None) -> list[DepartmentResponse]:
         return [self._response(document) for document in await self.repository.find_many(scope)]
+
+    async def list_page(
+        self, scope: ObjectId | None, offset: int, limit: int
+    ) -> Page[DepartmentResponse]:
+        page = await self.repository.find_many_page(scope, offset, limit)
+        return Page(items=[self._response(document) for document in page.items], total=page.total)
+
+    async def list_page_v1(
+        self, scope: ObjectId | None, page: int, page_size: int
+    ) -> Page[DepartmentResponse]:
+        result = await self.repository.find_many_page_v1(scope, page, page_size)
+        return Page(items=[self._response(document) for document in result.items], total=result.total)
 
     async def get(self, department_id: str, scope: ObjectId | None) -> DepartmentResponse:
         object_id = parse_object_id(department_id, "Mã phòng ban")

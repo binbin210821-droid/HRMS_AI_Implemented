@@ -1,11 +1,13 @@
 import logging
 from collections.abc import Callable
+from datetime import date as Date
 from typing import Any
 
 from bson import ObjectId
 from fastapi import HTTPException, status
 from pymongo.errors import PyMongoError
 
+from app.core.pagination import Page
 from app.core.time import BusinessClock
 from app.models.overload import (
     OverloadLogDocument,
@@ -89,6 +91,29 @@ class OverloadService:
     async def list_logs(self, scope: ObjectId | None) -> list[OverloadLogResponse]:
         logs = await self.repository.list_logs(scope)
         return await self._responses_with_context(logs)
+
+    async def list_logs_page(
+        self, scope: ObjectId | None, offset: int, limit: int
+    ) -> Page[OverloadLogResponse]:
+        page = await self.repository.list_logs_page(scope, offset, limit)
+        return Page(items=await self._responses_with_context(page.items), total=page.total)
+
+    async def list_logs_page_v1(
+        self,
+        scope: ObjectId | None,
+        from_date: Date | None,
+        to_date: Date | None,
+        sort_stage: dict[str, int],
+        page: int,
+        page_size: int,
+    ) -> Page[OverloadLogResponse]:
+        result = await self.repository.list_logs_page_v1(
+            scope, from_date, to_date, sort_stage, page, page_size
+        )
+        return Page(
+            items=await self._responses_with_context(result.items),
+            total=result.total,
+        )
 
     async def scan(self, scope: ObjectId | None) -> OverloadScanResponse:
         await self.repository.ensure_indexes()

@@ -1,9 +1,10 @@
 from collections.abc import Callable
+from typing import cast
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import get_settings
 from app.core.database import get_mongo_database
@@ -11,18 +12,69 @@ from app.core.security import decode_access_token
 from app.models.user import CurrentUser, UserRole
 from app.repositories.user_repository import UserRepository
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+bearer_scheme = HTTPBearer(auto_error=False)
+oauth2_scheme = bearer_scheme
 
 
 def get_user_repository() -> UserRepository:
     return UserRepository(get_mongo_database().get_database())
 
 
+def extract_request_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+) -> str:
+    settings = get_settings()
+    cookie_token = request.cookies.get(settings.auth_access_cookie_name)
+    bearer_token = credentials.credentials if credentials else None
+    authorization = request.headers.get("authorization")
+
+    if authorization and not credentials and authorization.lower().startswith("bearer"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Bearer token không hợp lệ",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if cookie_token and bearer_token and cookie_token != bearer_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Các thông tin xác thực không khớp",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if bearer_token and not settings.legacy_bearer_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Bearer token tương thích đã được tắt",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = cookie_token or bearer_token
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Bạn cần đăng nhập để tiếp tục",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    request.state.auth_source = "cookie" if cookie_token else "bearer"
+    return token
+
+
+async def get_auth_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> str:
+    return extract_request_token(request, credentials)
+
+
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    token: str = Depends(get_auth_token),
     repository: UserRepository = Depends(get_user_repository),
+    request: Request = cast(Request, None),
 ) -> CurrentUser:
-    return await resolve_current_user(token, repository)
+    current_user = await resolve_current_user(token, repository)
+    if request is not None:
+        request.state.authenticated_user_id = current_user.user_id
+    return current_user
 
 
 async def resolve_current_user(token: str, repository: UserRepository) -> CurrentUser:

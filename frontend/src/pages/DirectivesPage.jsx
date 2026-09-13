@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import Modal from '../components/Modal.jsx'
+import { useActionFeedback } from '../components/feedback/index.js'
 import { FadeIn } from '../components/animations/index.js'
 import AttachmentLink from '../components/attachments/AttachmentLink.jsx'
 import MainLayout from '../components/layout/MainLayout.jsx'
+import { Button, Dialog, Select, Textarea } from '../components/ui/index.js'
 import {
   getDepartmentEvaluationAttachmentUrl,
   listDepartmentEvaluations,
@@ -28,8 +29,10 @@ import {
   listTasks,
   requestTaskDirectiveRevision,
 } from '../features/tasks/tasksApi.js'
-import { useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { invalidateResource } from '../services/requestCoordinator.js'
 import { useAuthStore } from '../stores/authStore.js'
+import { generateIdempotencyKey } from '../utils/idempotency.js'
 
 const ALERT_TYPE_LABELS = {
   all: 'Tất cả loại cảnh báo',
@@ -52,6 +55,7 @@ const TASK_FOCUS_LABELS = {
 
 function DirectivesPage() {
   const role = useAuthStore((state) => state.role)
+  const { confirmAction, notifyActionSuccess, notifyActionError } = useActionFeedback()
   const navigate = useNavigate()
   const [alertDirectives, setAlertDirectives] = useState([])
   const [alerts, setAlerts] = useState([])
@@ -62,14 +66,15 @@ function DirectivesPage() {
   const [errors, setErrors] = useState([])
   const [isLoading, setIsLoading] = useState(true)
   const [sourceFilter, setSourceFilter] = useState('all')
-  const [statusFilter, setStatusFilter] = useState(() =>
-    role === 'leadership' ? 'submitted' : 'pending',
-  )
+  // Leadership cần nhìn thấy cả chỉ thị đang chờ Manager tiếp nhận. Nếu mặc định
+  // chỉ lọc `submitted`, chỉ thị pending vẫn tải thành công nhưng biến mất khỏi UI.
+  const [statusFilter, setStatusFilter] = useState('all')
   const [selectedReview, setSelectedReview] = useState(null)
   const [selectedDirective, setSelectedDirective] = useState(null)
   const [reviewNote, setReviewNote] = useState('')
   const [isReviewSaving, setIsReviewSaving] = useState(false)
   const [reviewError, setReviewError] = useState('')
+  const reviewIdempotencyKeyRef = useRef(null)
 
   const loadDirectives = useCallback(async () => {
     setIsLoading(true)
@@ -104,21 +109,47 @@ function DirectivesPage() {
     void loadDirectives()
   }, [loadDirectives])
 
-  useRealtimeUpdates('department_directives', () => {
-    void loadDirectives()
-  })
-  useRealtimeUpdates('task_directives', () => {
-    void loadDirectives()
-  })
-  useRealtimeUpdates('alerts', () => {
-    void loadDirectives()
-  })
-  useRealtimeUpdates('tasks', () => {
-    void loadDirectives()
-  })
-  useRealtimeUpdates('department_evaluations', () => {
-    void loadDirectives()
-  })
+  const refreshDirectives = useCallback(() => {
+    invalidateResource('alerts')
+    invalidateResource('tasks')
+    return loadDirectives()
+  }, [loadDirectives])
+
+  useRealtimeUpdates(
+    'department_directives',
+    () => {
+      void refreshDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
+  useRealtimeUpdates(
+    'task_directives',
+    () => {
+      void refreshDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
+  useRealtimeUpdates(
+    'alerts',
+    () => {
+      void refreshDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
+  useRealtimeUpdates(
+    'tasks',
+    () => {
+      void refreshDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
+  useRealtimeUpdates(
+    'department_evaluations',
+    () => {
+      void refreshDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
 
   const taskMap = useMemo(() => Object.fromEntries(tasks.map((task) => [task.id, task])), [tasks])
   const alertMap = useMemo(
@@ -217,6 +248,7 @@ function DirectivesPage() {
     }
     if (role === 'leadership' && directive.normalizedStatus === 'submitted') {
       setSelectedReview(directive)
+      reviewIdempotencyKeyRef.current = generateIdempotencyKey()
       setReviewNote('')
       setReviewError('')
       return
@@ -247,6 +279,21 @@ function DirectivesPage() {
       setReviewError('Vui lòng nhập lý do yêu cầu xử lý lại.')
       return
     }
+    const isAccepting = action === 'accept'
+    const confirmed = await confirmAction({
+      title: isAccepting ? 'Xác nhận nghiệm thu chỉ thị' : 'Xác nhận yêu cầu xử lý lại',
+      description: isAccepting
+        ? 'Chỉ thị sẽ được ghi nhận là đã nghiệm thu.'
+        : 'Chỉ thị sẽ được chuyển lại để người phụ trách bổ sung hoặc xử lý lại.',
+      details: [
+        `Loại chỉ thị: ${selectedReview.sourceLabel}`,
+        `Nội dung: ${selectedReview.title}`,
+        `Phòng ban: ${selectedReview.departmentName || 'Chưa xác định'}`,
+        `Ghi chú: ${reviewNote.trim() || 'Không thêm ghi chú'}`,
+      ],
+      confirmLabel: isAccepting ? 'Xác nhận nghiệm thu' : 'Yêu cầu xử lý lại',
+    })
+    if (!confirmed) return
     setIsReviewSaving(true)
     setReviewError('')
     try {
@@ -254,17 +301,41 @@ function DirectivesPage() {
       const updated =
         selectedReview.source === 'task'
           ? action === 'accept'
-            ? await acceptDepartmentTaskDirective(selectedReview.id, payload)
-            : await requestTaskDirectiveRevision(selectedReview.id, payload)
+            ? await acceptDepartmentTaskDirective(
+                selectedReview.id,
+                payload,
+                reviewIdempotencyKeyRef.current,
+              )
+            : await requestTaskDirectiveRevision(
+                selectedReview.id,
+                payload,
+                reviewIdempotencyKeyRef.current,
+              )
           : action === 'accept'
-            ? await acceptDepartmentDirective(selectedReview.id, payload)
-            : await requestDepartmentDirectiveRevision(selectedReview.id, payload)
+            ? await acceptDepartmentDirective(
+                selectedReview.id,
+                payload,
+                reviewIdempotencyKeyRef.current,
+              )
+            : await requestDepartmentDirectiveRevision(
+                selectedReview.id,
+                payload,
+                reviewIdempotencyKeyRef.current,
+              )
       const setter = selectedReview.source === 'task' ? setTaskDirectives : setAlertDirectives
       setter((current) => current.map((item) => (item.id === selectedReview.id ? updated : item)))
       setSelectedReview(null)
+      reviewIdempotencyKeyRef.current = null
       await loadDirectives()
+      notifyActionSuccess({
+        title: isAccepting ? 'Đã nghiệm thu chỉ thị' : 'Đã yêu cầu xử lý lại',
+        message: `${selectedReview.title} đã được cập nhật thành công.`,
+        details: [`Phòng ban: ${selectedReview.departmentName || 'Chưa xác định'}`],
+      })
     } catch (requestError) {
-      setReviewError(requestError.message || 'Không thể cập nhật kết quả nghiệm thu.')
+      const message = requestError.message || 'Không thể cập nhật kết quả nghiệm thu.'
+      setReviewError(message)
+      notifyActionError({ title: 'Chưa cập nhật chỉ thị', message })
     } finally {
       setIsReviewSaving(false)
     }
@@ -273,7 +344,7 @@ function DirectivesPage() {
   return (
     <MainLayout>
       <FadeIn className="mx-auto max-w-7xl">
-        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <p className="!text-caption !font-semibold !uppercase !tracking-wider !text-brand-600">
@@ -286,13 +357,9 @@ function DirectivesPage() {
                   : 'Tiếp nhận yêu cầu từ Lãnh đạo và chuyển đến đúng màn hình nghiệp vụ để xử lý.'}
               </p>
             </div>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => void loadDirectives()}
-            >
+            <Button type="button" variant="secondary" onClick={() => void loadDirectives()}>
               Làm mới
-            </button>
+            </Button>
           </div>
 
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
@@ -323,19 +390,22 @@ function DirectivesPage() {
               <div className="flex flex-wrap gap-2">
                 {[
                   ['pending', `${totals.pending} đang chờ xử lý`],
+                  ['acknowledged', `${totals.acknowledged} đang thực hiện`],
                   ['submitted', `${totals.submitted} chờ nghiệm thu`],
                   ['needs_revision', `${totals.needsRevision} cần xử lý lại`],
                   ['accepted', `${totals.accepted} đã nghiệm thu`],
                   ['all', `${totals.all} yêu cầu và điều phối`],
                 ].map(([value, label]) => (
-                  <button
+                  <Button
                     key={value}
                     type="button"
-                    className={`rounded-full border px-3 py-2 text-sm font-semibold transition ${statusFilter === value ? 'border-brand-600 bg-brand-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-brand-300'}`}
+                    variant="ghost"
+                    size="sm"
+                    className={`rounded-full border px-3 py-2 text-sm font-semibold shadow-none ${statusFilter === value ? 'border-brand-600 bg-brand-600 text-white hover:bg-brand-700' : 'border-slate-200 bg-white text-slate-600 hover:border-brand-300 hover:bg-white'}`}
                     onClick={() => setStatusFilter(value)}
                   >
                     {label}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
@@ -411,10 +481,13 @@ function DirectivesPage() {
       </FadeIn>
 
       {selectedReview && (
-        <Modal
+        <Dialog
           title={`${selectedReview.sourceLabel}: Nghiệm thu`}
           description={`${selectedReview.title} · ${selectedReview.countLabel}`}
-          onClose={() => setSelectedReview(null)}
+          onClose={() => {
+            setSelectedReview(null)
+            reviewIdempotencyKeyRef.current = null
+          }}
         >
           <div className="space-y-4">
             <div className="rounded-xl bg-slate-50 p-4 text-sm text-slate-700">
@@ -429,8 +502,8 @@ function DirectivesPage() {
             )}
             <label className="block text-sm font-semibold text-slate-700">
               Ghi chú nghiệm thu hoặc lý do xử lý lại
-              <textarea
-                className="form-input mt-1 min-h-28"
+              <Textarea
+                className="mt-1 min-h-28"
                 maxLength={1000}
                 value={reviewNote}
                 onChange={(event) => setReviewNote(event.target.value)}
@@ -438,32 +511,36 @@ function DirectivesPage() {
               />
             </label>
             <div className="flex justify-end gap-3">
-              <button
+              <Button
                 type="button"
-                className="secondary-button"
-                onClick={() => setSelectedReview(null)}
+                variant="secondary"
+                onClick={() => {
+                  setSelectedReview(null)
+                  reviewIdempotencyKeyRef.current = null
+                }}
               >
                 Đóng
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                className="secondary-button border-amber-300 text-amber-800"
+                variant="secondary"
+                className="border-amber-300 text-amber-800 hover:bg-amber-50"
                 disabled={isReviewSaving}
                 onClick={() => void handleReview('revision')}
               >
                 Yêu cầu xử lý lại
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                className="primary-button"
+                loading={isReviewSaving}
                 disabled={isReviewSaving}
                 onClick={() => void handleReview('accept')}
               >
-                {isReviewSaving ? 'Đang lưu...' : 'Nghiệm thu đạt'}
-              </button>
+                Nghiệm thu đạt
+              </Button>
             </div>
           </div>
-        </Modal>
+        </Dialog>
       )}
 
       {selectedDirective && (
@@ -525,13 +602,9 @@ function DirectiveCard({ directive, role, onOpen }) {
         {directive.accepted_at && <span>Nghiệm thu: {formatDateTime(directive.accepted_at)}</span>}
       </div>
       <div className="mt-4 flex justify-end border-t border-slate-200 pt-3">
-        <button
-          type="button"
-          className={pending ? 'primary-button' : 'secondary-button'}
-          onClick={onOpen}
-        >
+        <Button type="button" variant={pending ? 'primary' : 'secondary'} onClick={onOpen}>
           {actionLabel} →
-        </button>
+        </Button>
       </div>
     </article>
   )
@@ -608,7 +681,7 @@ function DirectiveDetailModal({ directive, onClose }) {
   const coordination = directive.source === 'coordination'
   const taskDirective = directive.source === 'task'
   return (
-    <Modal
+    <Dialog
       title="Xem lại chỉ thị đã nghiệm thu"
       description={`${directive.sourceLabel} · ${directive.title}`}
       onClose={onClose}
@@ -691,12 +764,12 @@ function DirectiveDetailModal({ directive, onClose }) {
         </div>
 
         <div className="flex justify-end border-t border-slate-200 pt-4">
-          <button type="button" className="secondary-button" onClick={onClose}>
+          <Button type="button" variant="secondary" onClick={onClose}>
             Đóng
-          </button>
+          </Button>
         </div>
       </div>
-    </Modal>
+    </Dialog>
   )
 }
 
@@ -784,13 +857,9 @@ function SelectFilter({ label, value, onChange, children }) {
   return (
     <label className="min-w-56 text-sm font-semibold text-slate-700">
       {label}
-      <select
-        className="form-input mt-1"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
+      <Select className="mt-1" value={value} onChange={(event) => onChange(event.target.value)}>
         {children}
-      </select>
+      </Select>
     </label>
   )
 }

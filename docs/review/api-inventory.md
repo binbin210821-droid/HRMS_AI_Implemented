@@ -37,7 +37,7 @@ Không tìm thấy frontend gọi URL không có route backend tương ứng. C�
 
 | Endpoint | Method | Gọi từ (file) | Trạng thái | Quyền truy cập | Ghi chú |
 |---|---|---|---|---|---|
-| `/api/department-evaluations/weekly-review` | GET | `DepartmentEvaluationsPage.jsx` | Đang dùng | Leadership | Đọc context phòng ban, kỳ tuần, snapshot evidence hiện có hoặc dựng từ metrics/tasks/alerts/directives; không ghi DB. |
+| `/api/v1/department-evaluations/weekly-reviews/{department_id}/{week_start}` | GET | `DepartmentEvaluationsPage.jsx` | Đang dùng | Leadership | Route v1 chuẩn; đọc context phòng ban và snapshot evidence hiện có hoặc dựng từ metrics/tasks/alerts/directives; ngày trong tuần được service chuẩn hóa về thứ Hai. |
 | `/api/department-evaluations` | GET | `DepartmentEvaluationsPage.jsx`, `DirectivesPage.jsx` | Đang dùng | Manager scope phòng mình; Leadership chọn toàn công ty/phòng | `DepartmentEvaluationService.list` → repository count + page query; Manager không thể đổi `department_id` ra ngoài scope. |
 | `/api/department-evaluations/{evaluation_id}` | GET | `DepartmentEvaluationsPage.jsx` | Đang dùng | Manager scope; Leadership toàn công ty | Đọc evaluation rồi `_ensure_scope`; response chỉ metadata attachment, không tạo signed URL hàng loạt. |
 | `/api/department-evaluations/weekly-review` | POST | `DepartmentEvaluationsPage.jsx` | Đang dùng | Leadership | Form multipart hoặc direct-upload session → dựng evidence snapshot → lưu `department_weekly_evaluations`, audit, commit session; Change Stream topic `department_evaluations`. |
@@ -96,8 +96,6 @@ Không tìm thấy frontend gọi URL không có route backend tương ứng. C�
 | `/api/coordination/department-directives/{directive_id}/submit` | POST | `ManagerAlertDirectiveAction.jsx` | Đang dùng | Manager đúng target department | Tính progress từ alert, chuyển sang submitted; Change Stream. |
 | `/api/coordination/department-directives/{directive_id}/accept` | POST | `DirectivesPage.jsx` | Đang dùng | Leadership | Chỉ accept khi submitted và progress đủ; Change Stream. |
 | `/api/coordination/department-directives/{directive_id}/request-revision` | POST | `DirectivesPage.jsx` | Đang dùng | Leadership | Chuyển submitted → needs_revision; Change Stream. |
-| `/api/coordination/alerts/{alert_id}/directive-targets` | GET | Không tìm thấy caller runtime; không tìm thấy caller nào khác trong frontend. | Không dùng | Leadership | Service tìm phòng cùng specialty; wrapper tồn tại nhưng flow cũ không còn dùng. |
-| `/api/coordination/alerts/{alert_id}/direct` | POST | Không tìm thấy caller runtime; không tìm thấy caller nào khác trong frontend. | Không dùng | Leadership; deprecated | Service luôn trả 409, thông báo flow cá nhân đã được thay bằng chỉ thị cấp phòng ban. |
 | `/api/coordination/directives` | GET | `DirectivesPage.jsx`, `ManagerAlertDirectiveAction.jsx`, `DirectiveSummaryCard.jsx` | Đang dùng | Manager target department; Leadership toàn công ty | Danh sách chỉ thị điều phối chéo phòng ban. |
 | `/api/coordination/directives/{directive_id}/candidates` | GET | `ManagerAlertDirectiveAction.jsx` | Đang dùng | Manager target department; Leadership bị service chặn | Lấy alert liên quan rồi aggregate candidate trong phòng đích. |
 | `/api/coordination/directives/{directive_id}/fulfill` | POST | `ManagerAlertDirectiveAction.jsx` | Đang dùng | Manager target department | Ghi plan/audit, resolve alert, đánh dấu directive fulfilled, publish `COORDINATION_APPLIED`. |

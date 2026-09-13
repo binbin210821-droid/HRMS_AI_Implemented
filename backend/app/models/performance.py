@@ -79,6 +79,20 @@ class DepartmentPerformanceAnalyticsResponse(BaseModel):
     employees: list[EmployeePerformanceComparison]
 
 
+class WeeklyPerformanceTrendPoint(BaseModel):
+    week_start: Date
+    week_label: str
+    performance: float
+    quality: float | None = None
+
+
+class DepartmentWeeklyPerformanceTrendResponse(BaseModel):
+    department_id: str
+    department_name: str
+    weeks: list[WeeklyPerformanceTrendPoint]
+    overall_average: float | None = None
+
+
 class DepartmentPerformanceComparison(BaseModel):
     department_id: str
     department_name: str

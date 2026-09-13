@@ -1,6 +1,17 @@
 from datetime import date as Date
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import ValidationError
 
 from app.api.dependencies import get_current_user, get_department_scope, require_role
@@ -8,7 +19,9 @@ from app.core.config import get_settings
 from app.core.database import get_mongo_database
 from app.core.time import BusinessClock
 from app.infrastructure.evidence_storage import create_evidence_storage
+from app.infrastructure.idempotency import IdempotencyContext, complete_idempotency, idempotent
 from app.infrastructure.malware_scanner import create_malware_scanner
+from app.infrastructure.rate_limit import rate_limit_group
 from app.models.department_evaluation import (
     DepartmentEvaluationDownloadUrlResponse,
     DepartmentWeeklyEvaluationListResponse,
@@ -26,7 +39,7 @@ from app.services.department_evaluation_service import (
     EvaluationUpload,
 )
 
-router = APIRouter(prefix="/api/department-evaluations", tags=["Department Evaluations"])
+router = APIRouter(prefix="/department-evaluations", tags=["Department Evaluations"])
 
 
 def get_department_evaluation_service() -> DepartmentEvaluationService:
@@ -75,6 +88,7 @@ def _parse_payload(value: str, model_type):
     "/weekly-review",
     response_model=DepartmentWeeklyReviewResponse,
     summary="Xem bằng chứng đánh giá phòng ban theo tuần",
+    dependencies=[Depends(rate_limit_group("read_light"))],
 )
 async def get_weekly_department_review(
     department_id: str,
@@ -89,22 +103,44 @@ async def get_weekly_department_review(
     "",
     response_model=DepartmentWeeklyEvaluationListResponse,
     summary="Danh sách đánh giá phòng ban theo tuần",
+    dependencies=[Depends(rate_limit_group("read_light"))],
 )
 async def list_department_evaluations(
+    request: Request,
+    response: Response,
     department_id: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=12, ge=1, le=50),
+    offset: int | None = Query(default=None, ge=0, le=100_000),
+    limit: int | None = Query(default=None, ge=1, le=100),
     scope=Depends(get_department_scope),
     _: CurrentUser = Depends(get_current_user),
     service: DepartmentEvaluationService = Depends(get_department_evaluation_service),
 ) -> DepartmentWeeklyEvaluationListResponse:
-    return await service.list(scope, department_id, page, page_size)
+    if request.url.path.startswith("/api/v1/"):
+        effective_limit = limit or 100
+        effective_offset = offset or 0
+        page = (effective_offset // effective_limit) + 1
+        page_size = effective_limit
+    result = await service.list(scope, department_id, page, page_size)
+    if request.url.path.startswith("/api/v1/"):
+        response.headers["X-Total-Count"] = str(result.total)
+        response.headers["X-Offset"] = str((page - 1) * page_size)
+        response.headers["X-Limit"] = str(page_size)
+        if result.has_next:
+            next_offset = page * page_size
+            next_url = str(
+                request.url.include_query_params(offset=next_offset, limit=page_size)
+            )
+            response.headers["Link"] = f'<{next_url}>; rel="next"'
+    return result
 
 
 @router.get(
     "/{evaluation_id}",
     response_model=DepartmentWeeklyEvaluationResponse,
     summary="Xem chi tiết đánh giá phòng ban",
+    dependencies=[Depends(rate_limit_group("read_light"))],
 )
 async def get_department_evaluation(
     evaluation_id: str,
@@ -119,6 +155,7 @@ async def get_department_evaluation(
     "/{evaluation_id}/attachments/{attachment_id}/download-url",
     response_model=DepartmentEvaluationDownloadUrlResponse,
     summary="Tạo liên kết tải tài liệu đánh giá",
+    dependencies=[Depends(rate_limit_group("read_light"))],
 )
 async def get_department_evaluation_attachment_url(
     evaluation_id: str,
@@ -135,23 +172,28 @@ async def get_department_evaluation_attachment_url(
     response_model=DepartmentWeeklyEvaluationResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Lãnh đạo đánh giá phòng ban theo tuần",
+    dependencies=[Depends(rate_limit_group("mutation"))],
 )
 async def create_weekly_department_evaluation(
     payload: str = Form(...),
     files: list[UploadFile] | None = File(default=None),
     current_user: CurrentUser = Depends(require_role(UserRole.LEADERSHIP)),
     service: DepartmentEvaluationService = Depends(get_department_evaluation_service),
+    idempotency: IdempotencyContext | None = Depends(idempotent("weekly_evaluation")),
 ) -> DepartmentWeeklyEvaluationResponse:
     request = _parse_payload(payload, DepartmentWeeklyEvaluationPayload)
-    return await service.create(
+    result = await service.create(
         request, await _read_uploads(files or []), current_user.user_id
     )
+    await complete_idempotency(idempotency, result, status_code=201)
+    return result
 
 
 @router.patch(
     "/{evaluation_id}",
     response_model=DepartmentWeeklyEvaluationResponse,
     summary="Thay đổi đánh giá phòng ban theo tuần",
+    dependencies=[Depends(rate_limit_group("mutation"))],
 )
 async def update_weekly_department_evaluation(
     evaluation_id: str,

@@ -35,7 +35,7 @@ def request_json(
 
 def login(base_url: str, username: str, password: str) -> str:
     request = Request(
-        f"{base_url}/api/auth/login",
+        f"{base_url}/api/v1/auth/login",
         data=json.dumps({"username": username, "password": password}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -48,17 +48,19 @@ def main(args: argparse.Namespace) -> None:
     leadership_token = login(args.base_url, "demo.leadership", args.password)
     manager_token = login(args.base_url, "demo.manager", args.password)
 
-    status, created = request_json(args.base_url, "/api/alerts/scan", leadership_token, "POST")
+    status, created = request_json(args.base_url, "/api/v1/alerts/scan", leadership_token, "POST")
     assert status == 200, created
-    status, alerts = request_json(args.base_url, "/api/alerts", leadership_token)
+    status, alerts = request_json(args.base_url, "/api/v1/alerts", leadership_token)
     assert status == 200
+    alerts = alerts["items"]
     sample = next(alert for alert in alerts if alert["employee_code"] == "KD-NV-003")
     assert sample["severity"] == "medium"
     assert sample["alert_type"] == "early_warning"
     assert "Nên theo dõi" in sample["suggested_action"]
 
-    status, manager_alerts = request_json(args.base_url, "/api/alerts", manager_token)
+    status, manager_alerts = request_json(args.base_url, "/api/v1/alerts", manager_token)
     assert status == 200
+    manager_alerts = manager_alerts["items"]
     assert all(alert["department_id"] == sample["department_id"] for alert in manager_alerts)
     assert all(alert["employee_code"].startswith("KD-") for alert in manager_alerts)
 

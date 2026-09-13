@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
         "--role", choices=[role.value for role in UserRole], default=UserRole.MANAGER.value
     )
     parser.add_argument("--department-id", default=None)
+    parser.add_argument("--full-name", default="Tài khoản demo")
     return parser.parse_args()
 
 
@@ -31,9 +32,18 @@ async def seed_user(args: argparse.Namespace) -> None:
     settings = get_settings()
     client = AsyncIOMotorClient(settings.mongo_uri, serverSelectionTimeoutMS=5000)
     try:
+        if args.role == UserRole.MANAGER.value and not args.department_id:
+            raise ValueError("Manager bắt buộc phải có --department-id của phòng ban có thật")
+        if args.role == UserRole.LEADERSHIP.value and args.department_id:
+            raise ValueError("Leadership không được gán --department-id")
+
         department_id = ObjectId(args.department_id) if args.department_id else None
-        if args.role == UserRole.MANAGER.value and department_id is None:
-            department_id = ObjectId()
+        if department_id is not None:
+            department = await client[settings.database_name]["departments"].find_one(
+                {"_id": department_id, "is_active": True}, {"_id": 1}
+            )
+            if department is None:
+                raise ValueError("--department-id không tồn tại hoặc phòng ban đã bị khóa")
 
         user_id = ObjectId()
         await client[settings.database_name]["users"].update_one(
@@ -41,7 +51,7 @@ async def seed_user(args: argparse.Namespace) -> None:
             {
                 "$set": {
                     "password_hash": hash_password(args.password),
-                    "full_name": "Tài khoản demo",
+                    "full_name": args.full_name,
                     "role": args.role,
                     "department_id": department_id,
                     "is_active": True,

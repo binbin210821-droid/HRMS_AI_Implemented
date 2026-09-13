@@ -1,4 +1,6 @@
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
+
+import { MOTION, motionTransition } from './motion.js'
 
 const offsets = {
   left: { x: -24, y: 0 },
@@ -11,18 +13,20 @@ function SlideIn({
   children,
   direction = 'up',
   delay = 0,
-  duration = 0.45,
+  duration = MOTION.content,
   className = '',
   ...props
 }) {
   const offset = offsets[direction] || offsets.up
+  const shouldReduceMotion = useReducedMotion()
 
   return (
     <motion.div
       className={className}
-      initial={{ opacity: 0, ...offset }}
+      initial={shouldReduceMotion ? false : { opacity: 0, ...offset }}
       animate={{ opacity: 1, x: 0, y: 0 }}
-      transition={{ duration, delay, ease: 'easeOut' }}
+      exit={shouldReduceMotion ? undefined : { opacity: 0, ...offset }}
+      transition={shouldReduceMotion ? { duration: 0 } : motionTransition(duration, delay)}
       {...props}
     >
       {children}

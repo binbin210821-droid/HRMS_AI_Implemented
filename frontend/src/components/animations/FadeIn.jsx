@@ -1,12 +1,17 @@
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 
-function FadeIn({ children, delay = 0, duration = 0.4, className = '', ...props }) {
+import { MOTION, motionTransition } from './motion.js'
+
+function FadeIn({ children, delay = 0, duration = MOTION.content, className = '', ...props }) {
+  const shouldReduceMotion = useReducedMotion()
+
   return (
     <motion.div
       className={className}
-      initial={{ opacity: 0, y: 8 }}
+      initial={shouldReduceMotion ? false : { opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration, delay, ease: 'easeOut' }}
+      exit={shouldReduceMotion ? undefined : { opacity: 0, y: 8 }}
+      transition={shouldReduceMotion ? { duration: 0 } : motionTransition(duration, delay)}
       {...props}
     >
       {children}

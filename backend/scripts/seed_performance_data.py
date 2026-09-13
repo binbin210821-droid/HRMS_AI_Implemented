@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hashlib
 import sys
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -40,7 +41,12 @@ def metric_values(employee_code: str, day_offset: int) -> tuple[int, float, str 
     if employee_code.endswith("-002") and day_offset in {20, 21, 22}:
         return 5, 84.0, "Dữ liệu mẫu vượt ngưỡng khối lượng công việc"
 
-    employee_number = int(employee_code[-3:])
+    # Employee codes are business identifiers, not guaranteed numeric labels
+    # (for example, the existing ``NGB`` employee).  A stable digest keeps the
+    # demo series deterministic without imposing a naming convention.
+    employee_number = int.from_bytes(
+        hashlib.sha256(employee_code.encode("utf-8")).digest()[:4], "big"
+    )
     tasks_completed = 2 + ((day_offset + employee_number) % 3)
     quality_score = float(78 + ((day_offset + employee_number * 2) % 18))
     return tasks_completed, quality_score, None

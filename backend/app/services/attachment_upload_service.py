@@ -254,11 +254,11 @@ class AttachmentUploadService:
             for session in sessions
         ]
 
-    async def commit(self, session_ids: list[str]) -> None:
-        await self.repository.mark_committed(session_ids, self._now())
+    async def commit(self, session_ids: list[str], owner_id: str) -> None:
+        await self.repository.mark_committed(session_ids, owner_id, self._now())
 
-    async def fail(self, session_ids: list[str]) -> None:
-        await self.repository.mark_failed(session_ids, self._now())
+    async def fail(self, session_ids: list[str], owner_id: str) -> None:
+        await self.repository.mark_failed(session_ids, owner_id, self._now())
 
     async def discard(self, session_ids: list[str], owner_id: str) -> None:
         sessions = await self.repository.find_for_owner(session_ids, owner_id)
@@ -268,7 +268,7 @@ class AttachmentUploadService:
                     await self.storage.delete(session.generated_storage_key)
                 except Exception:
                     pass
-        await self.repository.mark_failed(session_ids, self._now())
+        await self.repository.mark_failed(session_ids, owner_id, self._now())
 
     async def _owned_session(self, session_id: str, owner_id: str) -> UploadSessionDocument:
         session = await self.repository.find_by_id(session_id)

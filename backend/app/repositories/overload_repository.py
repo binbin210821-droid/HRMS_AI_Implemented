@@ -5,7 +5,8 @@ from typing import Any
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.core.mongo_types import normalize_mongo_value
+from app.core.mongo_types import normalize_mongo_value, to_mongo_datetime
+from app.core.pagination import Page, paginate_aggregate
 from app.models.employee import EmployeeDocument
 from app.models.overload import OverloadLogDocument, WorkloadCandidateResponse
 from app.models.performance import PerformanceMetricDocument
@@ -61,12 +62,59 @@ class OverloadRepository:
         created = await self.logs.find_one({"_id": result.inserted_id})
         return OverloadLogDocument.model_validate(created)
 
-    async def list_logs(self, department_id: ObjectId | None) -> list[OverloadLogDocument]:
+    async def list_logs(
+        self, department_id: ObjectId | None, limit: int | None = None
+    ) -> list[OverloadLogDocument]:
         query = {"department_id": department_id} if department_id is not None else {}
-        documents = (
-            await self.logs.find(query).sort([("date", -1), ("created_at", -1)]).to_list(None)
-        )
+        cursor = self.logs.find(query).sort([("date", -1), ("created_at", -1)])
+        if limit is not None:
+            cursor = cursor.limit(limit)
+        documents = await cursor.to_list(None)
         return [OverloadLogDocument.model_validate(document) for document in documents]
+
+    async def list_logs_page(
+        self, department_id: ObjectId | None, offset: int, limit: int
+    ) -> Page[OverloadLogDocument]:
+        query = {"department_id": department_id} if department_id is not None else {}
+        total = await self.logs.count_documents(query)
+        documents = (
+            await self.logs.find(query)
+            .sort([("date", -1), ("created_at", -1)])
+            .skip(offset)
+            .limit(limit)
+            .to_list(None)
+        )
+        return Page(
+            items=[OverloadLogDocument.model_validate(document) for document in documents],
+            total=total,
+        )
+
+    async def list_logs_page_v1(
+        self,
+        department_id: ObjectId | None,
+        from_date: Date | None,
+        to_date: Date | None,
+        sort_stage: dict[str, int],
+        page: int,
+        page_size: int,
+    ) -> Page[OverloadLogDocument]:
+        query: dict[str, Any] = (
+            {"department_id": department_id} if department_id is not None else {}
+        )
+        date_filter: dict[str, Any] = {}
+        if from_date is not None:
+            date_filter["$gte"] = to_mongo_datetime(from_date)
+        if to_date is not None:
+            date_filter["$lt"] = to_mongo_datetime(to_date + timedelta(days=1))
+        if date_filter:
+            query["date"] = date_filter
+        result = await paginate_aggregate(
+            self.logs, query, sort_stage, page, page_size
+        )
+        return Page(
+            items=[OverloadLogDocument.model_validate(document) for document in result.items],
+            total=result.total,
+        )
 
     async def find_rebalance_candidates(
         self,

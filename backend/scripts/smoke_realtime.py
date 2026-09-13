@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
 
 def login(base_url: str, username: str, password: str) -> str:
     request = Request(
-        f"{base_url}/api/auth/login",
+        f"{base_url}/api/v1/auth/login",
         data=json.dumps({"username": username, "password": password}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",

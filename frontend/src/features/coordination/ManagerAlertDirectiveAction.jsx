@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import Modal from '../../components/Modal.jsx'
-import { useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { useActionFeedback } from '../../components/feedback/index.js'
+import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { generateIdempotencyKey } from '../../utils/idempotency.js'
 import {
   acknowledgeDepartmentDirective,
   fulfillDirective,
@@ -11,7 +13,11 @@ import {
   listDirectives,
   submitDepartmentDirective,
 } from './coordinationApi.js'
-import { DIRECTIVE_SOURCE_LABELS, getDirectiveStatusLabel } from './directiveLabels.js'
+import {
+  DIRECTIVE_SOURCE_LABELS,
+  getDirectiveStatusClass,
+  getDirectiveStatusLabel,
+} from './directiveLabels.js'
 
 const FILTER_LABELS = {
   all: 'Tất cả',
@@ -22,6 +28,7 @@ const FILTER_LABELS = {
 }
 
 function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
+  const { confirmAction, notifyActionSuccess, notifyActionError } = useActionFeedback()
   const [searchParams, setSearchParams] = useSearchParams()
   const departmentDirectiveId = searchParams.get('alert_directive')
   const coordinationDirectiveId = searchParams.get('coordination_directive')
@@ -37,6 +44,7 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
   const [isSaving, setIsSaving] = useState(false)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [error, setError] = useState('')
+  const idempotencyKeyRef = useRef(null)
 
   const loadDirectives = useCallback(async () => {
     setIsLoading(true)
@@ -52,6 +60,9 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
         setDirective(selected ? { type: 'department', data: selected } : null)
         setCandidates([])
         setIsModalOpen(Boolean(selected))
+        if (selected && !idempotencyKeyRef.current) {
+          idempotencyKeyRef.current = generateIdempotencyKey()
+        }
       } else if (!coordinationDirectiveId) {
         setDirective(null)
         setIsModalOpen(false)
@@ -71,6 +82,9 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
           setCandidateId(candidateData?.[0]?.employee_id || '')
           setTasksToTransfer(String(selected.tasks_to_transfer || 1))
           setIsModalOpen(true)
+          if (!idempotencyKeyRef.current) {
+            idempotencyKeyRef.current = generateIdempotencyKey()
+          }
         }
       }
     } catch (requestError) {
@@ -84,9 +98,13 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
     void loadDirectives()
   }, [loadDirectives])
 
-  useRealtimeUpdates('department_directives', () => {
-    void loadDirectives()
-  })
+  useRealtimeUpdates(
+    'department_directives',
+    () => {
+      void loadDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
 
   const alertMap = useMemo(
     () => Object.fromEntries(alerts.map((alert) => [alert.id, alert])),
@@ -96,12 +114,20 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
   function progressFor(item) {
     const ids = item.alert_ids || []
     const relatedAlerts = ids.map((id) => alertMap[id]).filter(Boolean)
-    const total = ids.length || item.total_item_count || item.selected_alert_count || 0
-    const completed =
-      relatedAlerts.length === ids.length
+    const hasServerProgress = Number(item.total_item_count) > 0
+    const total = hasServerProgress
+      ? Number(item.total_item_count)
+      : ids.length || item.selected_alert_count || 0
+    const completed = hasServerProgress
+      ? Number(item.completed_item_count || 0)
+      : relatedAlerts.length === ids.length
         ? relatedAlerts.filter((alert) => alert.status === 'resolved').length
         : item.completed_item_count || 0
-    const percent = total ? Math.round((completed / total) * 100) : item.progress_percent || 0
+    const percent = hasServerProgress
+      ? Number(item.progress_percent || 0)
+      : total
+        ? Math.round((completed / total) * 100)
+        : 0
     return { completed, total, percent }
   }
 
@@ -111,6 +137,7 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
     setCompletionNote('')
     setCommitmentDate(new Date().toISOString().slice(0, 10))
     setError('')
+    idempotencyKeyRef.current = generateIdempotencyKey()
     setIsModalOpen(true)
   }
 
@@ -118,12 +145,14 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
     setDirective({ type: 'department', data: item })
     setCompletionNote('')
     setError('')
+    idempotencyKeyRef.current = generateIdempotencyKey()
     setIsModalOpen(true)
   }
 
   function closeDirective() {
     setDirective(null)
     setIsModalOpen(false)
+    idempotencyKeyRef.current = null
     const nextParams = new URLSearchParams(searchParams)
     nextParams.delete('alert_directive')
     nextParams.delete('coordination_directive')
@@ -133,29 +162,88 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
   async function handleSubmit(event) {
     event.preventDefault()
     if (!directive || isSaving) return
+    const isDepartmentDirective = directive.type === 'department'
+    const isSubmission =
+      isDepartmentDirective && ['acknowledged', 'needs_revision'].includes(directive.data.status)
+    const selectedCandidate = candidates.find((item) => item.employee_id === candidateId)
+    const confirmed = await confirmAction({
+      title: isSubmission
+        ? 'Xác nhận gửi nghiệm thu cảnh báo'
+        : isDepartmentDirective
+          ? 'Xác nhận tiếp nhận yêu cầu xử lý cảnh báo'
+          : 'Xác nhận áp dụng điều phối liên phòng ban',
+      description: isSubmission
+        ? 'Báo cáo xử lý cảnh báo sẽ được gửi đến Lãnh đạo để nghiệm thu.'
+        : isDepartmentDirective
+          ? 'Bạn sẽ tiếp nhận yêu cầu và ghi nhận kế hoạch xử lý cho phòng ban.'
+          : 'Công việc sẽ được điều phối theo nhân viên và số lượng bạn đã chọn.',
+      details: isDepartmentDirective
+        ? [
+            `Yêu cầu: ${directive.data.title || DIRECTIVE_SOURCE_LABELS.alert}`,
+            `Số cảnh báo liên quan: ${directive.data.selected_alert_count || directive.data.alert_ids?.length || 0}`,
+            isSubmission
+              ? `Nội dung nghiệm thu: ${completionNote.trim() || 'Không thêm ghi chú'}`
+              : `Ngày cam kết: ${commitmentDate || 'Chưa xác định'}`,
+          ]
+        : [
+            `Điều phối: ${directive.data.alert_title || DIRECTIVE_SOURCE_LABELS.coordination}`,
+            `Nhân viên nhận việc: ${selectedCandidate?.employee_name || 'Chưa xác định'}`,
+            `Số công việc chuyển: ${Number(tasksToTransfer) || 1}`,
+          ],
+      confirmLabel: isSubmission
+        ? 'Xác nhận gửi nghiệm thu'
+        : isDepartmentDirective
+          ? 'Xác nhận tiếp nhận'
+          : 'Xác nhận điều phối',
+    })
+    if (!confirmed) return
     setIsSaving(true)
     setError('')
     try {
       if (directive.type === 'department') {
         if (['acknowledged', 'needs_revision'].includes(directive.data.status)) {
-          await submitDepartmentDirective(directive.data.id, { completion_note: completionNote })
+          await submitDepartmentDirective(
+            directive.data.id,
+            { completion_note: completionNote },
+            idempotencyKeyRef.current,
+          )
         } else {
-          await acknowledgeDepartmentDirective(directive.data.id, {
-            note,
-            commitment_date: commitmentDate,
-          })
+          await acknowledgeDepartmentDirective(
+            directive.data.id,
+            {
+              note,
+              commitment_date: commitmentDate,
+            },
+            idempotencyKeyRef.current,
+          )
         }
       } else {
-        await fulfillDirective(directive.data.id, {
-          target_employee_id: candidateId,
-          tasks_to_transfer: Number(tasksToTransfer),
-        })
+        await fulfillDirective(
+          directive.data.id,
+          {
+            target_employee_id: candidateId,
+            tasks_to_transfer: Number(tasksToTransfer),
+          },
+          idempotencyKeyRef.current,
+        )
       }
       closeDirective()
       await loadDirectives()
       await onCompleted?.()
+      notifyActionSuccess({
+        title: isSubmission
+          ? 'Đã gửi nghiệm thu cảnh báo'
+          : isDepartmentDirective
+            ? 'Đã tiếp nhận yêu cầu xử lý cảnh báo'
+            : 'Đã áp dụng điều phối liên phòng ban',
+        message: isDepartmentDirective
+          ? 'Yêu cầu xử lý cảnh báo đã được cập nhật thành công.'
+          : `Đã chuyển ${Number(tasksToTransfer) || 1} công việc cho ${selectedCandidate?.employee_name || 'nhân viên đã chọn'}.`,
+      })
     } catch (requestError) {
-      setError(requestError.message || 'Không thể cập nhật yêu cầu hoặc điều phối.')
+      const message = requestError.message || 'Không thể cập nhật yêu cầu hoặc điều phối.'
+      setError(message)
+      notifyActionError({ title: 'Chưa cập nhật yêu cầu', message })
     } finally {
       setIsSaving(false)
     }
@@ -228,7 +316,9 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
                         {item.selected_alert_count} cảnh báo được giao xem xét
                       </p>
                     </div>
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-700">
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-bold ${getDirectiveStatusClass('alert', item.status)}`}
+                    >
                       {getDirectiveStatusLabel('alert', item.status)}
                     </span>
                   </div>
@@ -258,7 +348,7 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
                   </div>
                   <div className="mt-2 h-3 overflow-hidden rounded-full bg-slate-100">
                     <div
-                      className="h-full rounded-full bg-brand-600 transition-all"
+                      className="h-full rounded-full bg-brand-600 transition-all duration-motion-standard ease-motion-standard"
                       style={{ width: `${progress.percent}%` }}
                     />
                   </div>

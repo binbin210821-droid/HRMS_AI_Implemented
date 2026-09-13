@@ -11,12 +11,20 @@ __pycache__/
 .venv/
 venv/
 .runtime/
+*.log
+*.out
+.coverage
+coverage/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Node
 node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/test-results/
+playwright-report/
 
 # IDE and OS
 .idea/

@@ -72,15 +72,25 @@ class AttachmentUploadRepository:
         )
         return await self.find_by_id(session_id)
 
-    async def mark_committed(self, session_ids: list[str], now: datetime) -> None:
+    async def mark_committed(
+        self, session_ids: list[str], owner_id: str, now: datetime
+    ) -> None:
         await self.sessions.update_many(
-            {"_id": {"$in": session_ids}, "status": "uploaded"},
+            {
+                "_id": {"$in": session_ids},
+                "owner_id": owner_id,
+                "status": "uploaded",
+            },
             {"$set": {"status": "committed", "updated_at": now}},
         )
 
-    async def mark_failed(self, session_ids: list[str], now: datetime) -> None:
+    async def mark_failed(self, session_ids: list[str], owner_id: str, now: datetime) -> None:
         await self.sessions.update_many(
-            {"_id": {"$in": session_ids}, "status": {"$in": ["pending", "uploaded"]}},
+            {
+                "_id": {"$in": session_ids},
+                "owner_id": owner_id,
+                "status": {"$in": ["pending", "uploaded"]},
+            },
             {"$set": {"status": "failed", "updated_at": now}},
         )
 

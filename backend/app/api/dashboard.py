@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends
 from app.api.dependencies import get_current_user, get_department_scope
 from app.core.database import get_mongo_database
 from app.core.time import BusinessClock
+from app.infrastructure.rate_limit import rate_limit_group
 from app.models.dashboard_attention import AttentionSummaryResponse
 from app.models.user import CurrentUser
 from app.repositories.alert_repository import AlertRepository
@@ -12,7 +13,7 @@ from app.repositories.employee_repository import EmployeeRepository
 from app.repositories.task_repository import TaskRepository
 from app.services.dashboard_attention_service import DashboardAttentionService
 
-router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
+router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
 
 def get_dashboard_attention_service() -> DashboardAttentionService:
@@ -31,6 +32,7 @@ def get_dashboard_attention_service() -> DashboardAttentionService:
     "/attention-summary",
     response_model=AttentionSummaryResponse,
     summary="Tổng hợp việc cần theo dõi",
+    dependencies=[Depends(rate_limit_group("read_heavy"))],
 )
 async def get_attention_summary(
     scope=Depends(get_department_scope),

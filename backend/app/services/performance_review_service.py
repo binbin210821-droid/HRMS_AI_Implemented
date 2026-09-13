@@ -1,6 +1,6 @@
 from datetime import date as Date
 from datetime import datetime, timedelta, timezone
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from bson import ObjectId
 from fastapi import HTTPException, status
@@ -14,7 +14,7 @@ from app.models.task_execution import (
     DailyPerformanceReviewCreate,
     DailyPerformanceReviewResponse,
     DailyPerformanceReviewSummary,
-    DailyReviewAttachmentMetadata,
+    DailyReviewAttachmentResponse,
     DailyReviewDownloadUrlResponse,
     DailyReviewEmployeeResponse,
     DailyReviewTaskResponse,
@@ -75,9 +75,8 @@ class PerformanceReviewService:
                 item
                 for report in reports
                 for item in report.attachments
-                if item.attachment_id == attachment_id or (
-                    item.attachment_id is None and item.checksum == attachment_id
-                )
+                if item.attachment_id == attachment_id
+                or (item.attachment_id is None and item.checksum == attachment_id)
             ),
             None,
         )
@@ -97,8 +96,7 @@ class PerformanceReviewService:
             )
         return DailyReviewDownloadUrlResponse(
             url=url,
-            expires_at=self._clock.now()
-            + timedelta(seconds=self.storage_ttl),
+            expires_at=self._clock.now() + timedelta(seconds=self.storage_ttl),
         )
 
     async def save_review(
@@ -108,6 +106,7 @@ class PerformanceReviewService:
         reviewed_by: str,
         *,
         allow_update: bool = False,
+        reason: str | None = None,
     ) -> DailyPerformanceReviewResponse:
         if scope is None:
             raise self._forbidden("Lãnh đạo không trực tiếp nghiệm thu hiệu suất nhân viên")
@@ -146,16 +145,17 @@ class PerformanceReviewService:
         evidence_count = 0
         review_entries: list[dict] = []
         audit_entries: list[dict] = []
+        operation_reason = reason.strip() if reason and reason.strip() else None
         for item, task_id in zip(request.items, submitted_ids, strict=True):
             report = reports.get(task_id)
             attachments = report.attachments if report else []
             existing_review = report.manager_review if report else None
             change_reason = item.change_reason.strip() if item.change_reason else None
             score_changed = bool(
-                allow_update
-                and existing_review is not None
-                and item.score != existing_review.score
+                allow_update and existing_review is not None and item.score != existing_review.score
             )
+            if score_changed and not change_reason:
+                change_reason = operation_reason
             if score_changed and not change_reason:
                 raise self._unprocessable(
                     f'Vui lòng nhập lý do thay đổi điểm cho công việc "{task_by_id[task_id].title}"'
@@ -173,9 +173,7 @@ class PerformanceReviewService:
             review_entries.append(
                 {
                     "report": report,
-                    "placeholder": self._placeholder_report(
-                        task_by_id[task_id], request.date, now
-                    ),
+                    "placeholder": self._placeholder_report(task_by_id[task_id], request.date, now),
                     "review": {
                         "score": item.score,
                         "note": item.note.strip() if item.note and item.note.strip() else None,
@@ -199,9 +197,7 @@ class PerformanceReviewService:
             audit_entries.append(
                 {
                     "action": (
-                        "task_score_changed"
-                        if score_changed
-                        else "task_execution_review_updated"
+                        "task_score_changed" if score_changed else "task_execution_review_updated"
                     ),
                     "actor_id": reviewer_id,
                     "task_id": task_id,
@@ -215,35 +211,42 @@ class PerformanceReviewService:
                 }
             )
 
-        reviewed_reports = await self.reports.bulk_update_manager_reviews(review_entries)
-        if any(task_id not in reviewed_reports for task_id in submitted_ids):
-            raise self._conflict("Báo cáo thực thi vừa được cập nhật, vui lòng tải lại")
+        async def persist(session: Any | None) -> Any:
+            reviewed_reports = await self._repository_call(
+                self.reports.bulk_update_manager_reviews,
+                review_entries,
+                session=session,
+            )
+            if any(task_id not in reviewed_reports for task_id in submitted_ids):
+                raise self._conflict("Báo cáo thực thi vừa được cập nhật, vui lòng tải lại")
 
-        tasks_completed = sum(
-            task.status == TaskStatus.DONE and self._utc_date(task.completed_at) == request.date
-            for task in tasks
-        )
-        quality_score = round(quality_total / weight_total, 2) if weight_total else 0.0
-        metric = await self.performance.upsert_daily_review(
-            employee_id,
-            request.date,
-            {
-                "tasks_completed": tasks_completed,
-                "quality_score": quality_score,
-                "reviewed_by": reviewer_id,
-                "performance_score": PerformanceScoreCalculator.calculate(
-                    tasks_completed, quality_score
-                ),
-                "note": "Đánh giá theo bằng chứng công việc",
-                "reviewed_task_count": len(tasks),
-                "evidence_task_count": evidence_count,
-                "total_review_task_count": len(tasks),
-                "updated_at": now,
-                "created_at": now,
-            },
-        )
-        audit_entries.append(
-            {
+            tasks_completed = sum(
+                task.status == TaskStatus.DONE
+                and self._utc_date(task.completed_at) == request.date
+                for task in tasks
+            )
+            quality_score = round(quality_total / weight_total, 2) if weight_total else 0.0
+            metric = await self._repository_call(
+                self.performance.upsert_daily_review,
+                employee_id,
+                request.date,
+                {
+                    "tasks_completed": tasks_completed,
+                    "quality_score": quality_score,
+                    "reviewed_by": reviewer_id,
+                    "performance_score": PerformanceScoreCalculator.calculate(
+                        tasks_completed, quality_score
+                    ),
+                    "note": "Đánh giá theo bằng chứng công việc",
+                    "reviewed_task_count": len(tasks),
+                    "evidence_task_count": evidence_count,
+                    "total_review_task_count": len(tasks),
+                    "updated_at": now,
+                    "created_at": now,
+                },
+                session=session,
+            )
+            review_audit = {
                 "action": (
                     "daily_performance_review_updated"
                     if allow_update
@@ -256,18 +259,42 @@ class PerformanceReviewService:
                 "metric_id": metric.id,
                 "created_at": now,
             }
-        )
-        await self.tasks.insert_audit_logs(audit_entries)
+            if operation_reason:
+                review_audit["change_reason"] = operation_reason
+            audit_entries.append(review_audit)
+            await self._repository_call(
+                self.tasks.insert_audit_logs, audit_entries, session=session
+            )
+            return metric
+
+        await self._run_write_transaction(persist)
         await event_bus.publish(PERFORMANCE_METRIC_CREATED, {"employee_id": employee_id})
         return await self.get_review(str(employee_id), request.date, scope)
+
+    async def _run_write_transaction(self, operation: Any) -> Any:
+        client = getattr(self.performance, "client", None)
+        if client is None:
+            return await operation(None)
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                return await operation(session)
+
+    async def _repository_call(
+        self, method: Any, *args: Any, session: Any | None
+    ) -> Any:
+        if session is None:
+            return await method(*args)
+        return await method(*args, session=session)
 
     async def update_review(
         self,
         request: DailyPerformanceReviewCreate,
         scope: ObjectId | None,
         reviewed_by: str,
+        *,
+        reason: str | None = None,
     ) -> DailyPerformanceReviewResponse:
-        return await self.save_review(request, scope, reviewed_by, allow_update=True)
+        return await self.save_review(request, scope, reviewed_by, allow_update=True, reason=reason)
 
     async def _review_tasks(self, employee_id: ObjectId, review_date: Date) -> list[TaskDocument]:
         tasks = await self.tasks.find_tasks_for_review(employee_id, review_date)
@@ -297,7 +324,7 @@ class PerformanceReviewService:
             if report:
                 for attachment in report.attachments:
                     attachments.append(
-                        DailyReviewAttachmentMetadata(
+                        DailyReviewAttachmentResponse(
                             attachment_id=attachment.attachment_id or attachment.checksum,
                             file_name=attachment.file_name,
                             content_type=attachment.content_type,
@@ -326,7 +353,9 @@ class PerformanceReviewService:
                     completed_at=task.completed_at,
                     result_summary=report.result_summary if report else None,
                     progress_percent=report.progress_percent if report else 0,
-                    outcome_status=report.outcome_status if report else TaskExecutionOutcome.IN_PROGRESS,
+                    outcome_status=(
+                        report.outcome_status if report else TaskExecutionOutcome.IN_PROGRESS
+                    ),
                     attachments=attachments,
                     evidence_status=review.evidence_status if review else None,
                     score=review.score if review else None,
@@ -340,9 +369,14 @@ class PerformanceReviewService:
             for task in tasks
         )
         quality_score = round(weighted_total / weight_total, 2) if weight_total else None
-        can_finalize = bool(tasks) and reviewed_count == len(tasks) and all(
-            report.attachments or (report.manager_review and report.manager_review.missing_reason)
-            for report in reports_by_task.values()
+        can_finalize = (
+            bool(tasks)
+            and reviewed_count == len(tasks)
+            and all(
+                report.attachments
+                or (report.manager_review and report.manager_review.missing_reason)
+                for report in reports_by_task.values()
+            )
         )
         performance_score = (
             PerformanceScoreCalculator.calculate(tasks_completed, quality_score)
@@ -351,7 +385,9 @@ class PerformanceReviewService:
         )
         return DailyPerformanceReviewResponse(
             employee=DailyReviewEmployeeResponse(
-                id=str(employee.id), full_name=employee.full_name, employee_code=employee.employee_code
+                id=str(employee.id),
+                full_name=employee.full_name,
+                employee_code=employee.employee_code,
             ),
             date=review_date,
             tasks=response_tasks,
@@ -375,9 +411,11 @@ class PerformanceReviewService:
             "work_date": work_date,
             "result_summary": None,
             "progress_percent": 100 if task.status == TaskStatus.DONE else 0,
-            "outcome_status": TaskExecutionOutcome.COMPLETED.value
-            if task.status == TaskStatus.DONE
-            else TaskExecutionOutcome.IN_PROGRESS.value,
+            "outcome_status": (
+                TaskExecutionOutcome.COMPLETED.value
+                if task.status == TaskStatus.DONE
+                else TaskExecutionOutcome.IN_PROGRESS.value
+            ),
             "attachments": [],
             "created_at": now,
             "updated_at": now,
@@ -412,7 +450,7 @@ class PerformanceReviewService:
 
     @staticmethod
     def _unprocessable(message: str) -> HTTPException:
-        return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=message)
+        return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=message)
 
     @staticmethod
     def _conflict(message: str) -> HTTPException:

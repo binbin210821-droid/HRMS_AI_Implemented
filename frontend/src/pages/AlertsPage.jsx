@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AnimatePresence } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 
 import Modal from '../components/Modal.jsx'
 import { FadeIn } from '../components/animations/index.js'
 import MainLayout from '../components/layout/MainLayout.jsx'
-import { useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { Button, Input, Select, Textarea } from '../components/ui/index.js'
+import { REALTIME_COALESCE_DELAY_MS, useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { invalidateResource } from '../services/requestCoordinator.js'
 import {
   listAlerts,
   listDepartmentAlertSummaries,
   resolveAlert,
   scanAlerts,
 } from '../features/alerts/alertsApi.js'
+import AiAlertProposalCard from '../features/alerts/AiAlertProposalCard.jsx'
 import {
   applyCoordination,
   issueDepartmentDirective,
@@ -18,7 +22,10 @@ import {
   listCoordinationSuggestions,
 } from '../features/coordination/coordinationApi.js'
 import ManagerAlertDirectiveAction from '../features/coordination/ManagerAlertDirectiveAction.jsx'
+import { getDirectiveStatusLabel } from '../features/coordination/directiveLabels.js'
 import { useAuthStore } from '../stores/authStore.js'
+import { generateIdempotencyKey } from '../utils/idempotency.js'
+import { useActionFeedback } from '../components/feedback/index.js'
 
 const DIRECTIVE_ALERT_TYPES = new Set(['early_warning', 'overload'])
 
@@ -26,6 +33,7 @@ function AlertsPage() {
   const [searchParams] = useSearchParams()
   const focusedAlertId = searchParams.get('alert')
   const role = useAuthStore((state) => state.role)
+  const { confirmAction, notifyActionSuccess, notifyActionError } = useActionFeedback()
   const [alerts, setAlerts] = useState([])
   const [selectedAlert, setSelectedAlert] = useState(null)
   const [resolutionNote, setResolutionNote] = useState('')
@@ -66,6 +74,8 @@ function AlertsPage() {
   const [highlightedAlertId, setHighlightedAlertId] = useState(null)
   const [resolvingIds, setResolvingIds] = useState(() => new Set())
   const [newAlertBanners, setNewAlertBanners] = useState([])
+  const coordinationIdempotencyKeyRef = useRef(null)
+  const departmentDirectiveIdempotencyKeyRef = useRef(null)
   const bannerItemsRef = useRef([])
   const bannerTimerRef = useRef(null)
   const scrollTimerRef = useRef(null)
@@ -180,6 +190,17 @@ function AlertsPage() {
   async function handleResolve(event) {
     event.preventDefault()
     if (!selectedAlert) return
+    const confirmed = await confirmAction({
+      title: 'Xác nhận ghi nhận xử lý cảnh báo',
+      description: 'Hệ thống sẽ chuyển cảnh báo này sang trạng thái đã xử lý.',
+      details: [
+        `Cảnh báo: ${selectedAlert.title}`,
+        `Nhân viên: ${selectedAlert.employee_name}`,
+        `Ghi chú: ${resolutionNote.trim() || 'Không thêm ghi chú'}`,
+      ],
+      confirmLabel: 'Xác nhận xử lý',
+    })
+    if (!confirmed) return
     setIsSaving(true)
     setError('')
     try {
@@ -187,8 +208,15 @@ function AlertsPage() {
       applyResolvedAlert(updated)
       setSelectedAlert(null)
       setResolutionNote('')
+      notifyActionSuccess({
+        title: 'Đã ghi nhận xử lý cảnh báo',
+        message: `Cảnh báo của ${updated.employee_name || selectedAlert.employee_name} đã được cập nhật thành công.`,
+        details: [updated.title || selectedAlert.title],
+      })
     } catch (requestError) {
-      setError(requestError.message || 'Không thể cập nhật cảnh báo.')
+      const message = requestError.message || 'Không thể cập nhật cảnh báo.'
+      setError(message)
+      notifyActionError({ title: 'Chưa ghi nhận xử lý', message })
     } finally {
       setIsSaving(false)
     }
@@ -196,13 +224,27 @@ function AlertsPage() {
 
   async function handleQuickResolve(alert) {
     if (resolvingIds.has(alert.id)) return
+    const confirmed = await confirmAction({
+      title: 'Xác nhận đánh dấu đã xử lý',
+      description: 'Bạn đang xác nhận cảnh báo đã được xử lý mà không thêm ghi chú.',
+      details: [`Cảnh báo: ${alert.title}`, `Nhân viên: ${alert.employee_name}`],
+      confirmLabel: 'Đánh dấu đã xử lý',
+    })
+    if (!confirmed) return
     setResolvingIds((current) => new Set(current).add(alert.id))
     setError('')
     try {
       const updated = await resolveAlert(alert.id, '')
       applyResolvedAlert(updated)
+      notifyActionSuccess({
+        title: 'Đã đánh dấu cảnh báo đã xử lý',
+        message: `Cảnh báo của ${updated.employee_name || alert.employee_name} đã được cập nhật thành công.`,
+        details: [updated.title || alert.title],
+      })
     } catch (requestError) {
-      setError(requestError.message || 'Không thể cập nhật cảnh báo.')
+      const message = requestError.message || 'Không thể cập nhật cảnh báo.'
+      setError(message)
+      notifyActionError({ title: 'Chưa cập nhật cảnh báo', message })
     } finally {
       setResolvingIds((current) => {
         const next = new Set(current)
@@ -218,36 +260,71 @@ function AlertsPage() {
   }
 
   async function handleApplyCoordination(alert, payload = {}) {
+    const suggestion = coordinationSuggestions[alert.id]
+    const candidate = suggestion?.candidates?.find(
+      (item) => item.employee_id === payload.target_employee_id,
+    )
+    const confirmed = await confirmAction({
+      title: 'Xác nhận áp dụng phương án điều phối',
+      description: 'Hệ thống sẽ chuyển công việc theo thông tin bạn đã chọn.',
+      details: [
+        `Cảnh báo: ${alert.title}`,
+        `Nhân viên nhận việc: ${candidate?.employee_name || 'Nhân viên đã chọn'}`,
+        `Số công việc chuyển: ${Number(payload.tasks_to_transfer) || 1}`,
+        `Ghi chú: ${payload.note?.trim() || 'Không thêm ghi chú'}`,
+      ],
+      confirmLabel: 'Áp dụng điều phối',
+    })
+    if (!confirmed) return
     setError('')
     try {
-      const plan = await applyCoordination(alert.id, payload)
-      const resolutionNote = `Đã áp dụng điều phối: chuyển ${plan.tasks_to_transfer} công việc cho ${plan.target_employee_name}.${plan.note ? ` Ghi chú: ${plan.note}` : ''}`
-      setAlerts((current) =>
-        current.map((item) =>
-          item.id === alert.id
-            ? {
-                ...item,
-                status: 'resolved',
-                resolution_note: resolutionNote,
-                resolved_by: plan.created_by,
-                resolved_at: plan.created_at,
-                updated_at: plan.updated_at,
-              }
-            : item,
-        ),
-      )
-      setCoordinationSuggestions((current) => ({
-        ...current,
-        [alert.id]: {
-          ...current[alert.id],
-          applied_plan: plan,
-        },
-      }))
-      setHighlightedAlertId(alert.id)
-      setSelectedCoordination(null)
+      const plan = await applyCoordination(alert.id, payload, coordinationIdempotencyKeyRef.current)
+      applyCoordinationResult(alert, plan)
+      notifyActionSuccess({
+        title: 'Đã áp dụng phương án điều phối',
+        message: `Đã chuyển ${plan.tasks_to_transfer} công việc cho ${plan.target_employee_name}.`,
+        details: [
+          `Cảnh báo: ${alert.title}`,
+          plan.note ? `Ghi chú: ${plan.note}` : 'Không thêm ghi chú',
+        ],
+      })
     } catch (requestError) {
-      setError(requestError.message || 'Không thể áp dụng phương án điều phối.')
+      const message = requestError.message || 'Không thể áp dụng phương án điều phối.'
+      setError(message)
+      notifyActionError({ title: 'Chưa áp dụng điều phối', message })
     }
+  }
+
+  function applyCoordinationResult(alert, plan) {
+    const resolutionNote = `Đã áp dụng điều phối: chuyển ${plan.tasks_to_transfer} công việc cho ${plan.target_employee_name}.${plan.note ? ` Ghi chú: ${plan.note}` : ''}`
+    setAlerts((current) =>
+      current.map((item) =>
+        item.id === alert.id
+          ? {
+              ...item,
+              status: 'resolved',
+              resolution_note: resolutionNote,
+              resolved_by: plan.created_by,
+              resolved_at: plan.created_at,
+              updated_at: plan.updated_at,
+            }
+          : item,
+      ),
+    )
+    setCoordinationSuggestions((current) => ({
+      ...current,
+      [alert.id]: {
+        ...current[alert.id],
+        applied_plan: plan,
+      },
+    }))
+    setHighlightedAlertId(alert.id)
+    setSelectedCoordination(null)
+    coordinationIdempotencyKeyRef.current = null
+  }
+
+  function handleAiCoordinationApplied(alert, plan) {
+    applyCoordinationResult(alert, plan)
   }
 
   function openCoordinationEditor(alert, suggestion) {
@@ -258,6 +335,7 @@ function AlertsPage() {
       tasks_to_transfer: '1',
       note: '',
     })
+    coordinationIdempotencyKeyRef.current = generateIdempotencyKey()
     setSelectedCoordination({ alert, suggestion })
   }
 
@@ -273,6 +351,7 @@ function AlertsPage() {
 
   function openDepartmentDirective(summary) {
     setSelectedDepartment(summary)
+    departmentDirectiveIdempotencyKeyRef.current = generateIdempotencyKey()
     setDepartmentDirectiveError('')
     setDepartmentDirectiveForm({ alert_type: 'all', severity: 'all', note: '' })
   }
@@ -290,18 +369,33 @@ function AlertsPage() {
     setDepartmentDirectiveSaving(true)
     setDepartmentDirectiveError('')
     try {
-      const created = await issueDepartmentDirective(selectedDepartment.department_id, {
-        alert_type: departmentDirectiveForm.alert_type,
-        severity: departmentDirectiveForm.severity,
-        note: departmentDirectiveForm.note,
-      })
+      const created = await issueDepartmentDirective(
+        selectedDepartment.department_id,
+        {
+          alert_type: departmentDirectiveForm.alert_type,
+          severity: departmentDirectiveForm.severity,
+          note: departmentDirectiveForm.note,
+        },
+        departmentDirectiveIdempotencyKeyRef.current,
+      )
       setDepartmentDirectives((current) => [
         created,
         ...current.filter((item) => item.id !== created.id),
       ])
       setSelectedDepartment(null)
+      departmentDirectiveIdempotencyKeyRef.current = null
+      notifyActionSuccess({
+        title: 'Đã ra chỉ thị phòng ban',
+        message: `Chỉ thị cho ${selectedDepartment.department_name} đã được tạo thành công.`,
+        details: [
+          `Loại cảnh báo: ${departmentDirectiveForm.alert_type === 'all' ? 'Tất cả loại' : departmentDirectiveForm.alert_type}`,
+          `Mức độ: ${departmentDirectiveForm.severity === 'all' ? 'Tất cả mức độ' : departmentDirectiveForm.severity}`,
+        ],
+      })
     } catch (requestError) {
-      setDepartmentDirectiveError(requestError.message || 'Không thể ra chỉ thị phòng ban.')
+      const message = requestError.message || 'Không thể ra chỉ thị phòng ban.'
+      setDepartmentDirectiveError(message)
+      notifyActionError({ title: 'Chưa tạo chỉ thị phòng ban', message })
     } finally {
       setDepartmentDirectiveSaving(false)
     }
@@ -335,6 +429,7 @@ function AlertsPage() {
 
   const handleRealtimeAlert = useCallback(
     (message) => {
+      invalidateResource('alerts')
       void loadAlerts()
       if (message?.operation !== 'insert') return
 
@@ -381,10 +476,16 @@ function AlertsPage() {
     }, 100)
   }
 
-  useRealtimeUpdates('alerts', handleRealtimeAlert)
-  useRealtimeUpdates('department_directives', () => {
-    if (role === 'leadership') void loadDepartmentDirectives()
+  useRealtimeUpdates('alerts', handleRealtimeAlert, {
+    coalesceDelay: REALTIME_COALESCE_DELAY_MS,
   })
+  useRealtimeUpdates(
+    'department_directives',
+    () => {
+      if (role === 'leadership') void loadDepartmentDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY_MS },
+  )
 
   const filteredAlerts = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLocaleLowerCase('vi-VN')
@@ -582,7 +683,7 @@ function AlertsPage() {
   return (
     <MainLayout>
       <FadeIn className="mx-auto max-w-5xl">
-        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <p className="!text-caption !font-semibold !uppercase !tracking-wider !text-amber-600">
@@ -595,14 +696,9 @@ function AlertsPage() {
                 Theo dõi cả dấu hiệu sớm và tình trạng quá tải cần xử lý ngay.
               </p>
             </div>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={handleScan}
-              disabled={isScanning}
-            >
+            <Button type="button" variant="secondary" onClick={handleScan} disabled={isScanning}>
               {isScanning ? 'Đang quét...' : 'Quét lại dữ liệu'}
-            </button>
+            </Button>
           </div>
 
           <WeeklyAlertSparkline data={dailyAlertTrend} />
@@ -624,8 +720,8 @@ function AlertsPage() {
           <div className="mt-6 grid gap-3 rounded-2xl bg-slate-50 p-4 sm:grid-cols-2">
             <label className="text-sm font-medium text-slate-700">
               {role === 'leadership' ? 'Tìm phòng ban' : 'Tìm nhân viên'}
-              <input
-                className="form-input mt-1"
+              <Input
+                className="mt-1"
                 value={searchTerm}
                 onChange={(event) => setSearchTerm(event.target.value)}
                 placeholder={
@@ -635,15 +731,15 @@ function AlertsPage() {
             </label>
             <label className="text-sm font-medium text-slate-700">
               Loại cảnh báo
-              <select
-                className="form-input mt-1"
+              <Select
+                className="mt-1"
                 value={alertTypeFilter}
                 onChange={(event) => setAlertTypeFilter(event.target.value)}
               >
                 <option value="all">Tất cả loại</option>
                 <option value="early_warning">Dấu hiệu sớm</option>
                 <option value="overload">Quá tải</option>
-              </select>
+              </Select>
             </label>
           </div>
 
@@ -701,39 +797,47 @@ function AlertsPage() {
               departmentSummaryLoading ? (
                 <p className="text-sm text-slate-500">Đang tải tổng hợp cảnh báo...</p>
               ) : (
-                visibleDepartmentGroups.map((group) => (
-                  <DepartmentAlertGroup
-                    key={group.department_id}
-                    summary={group}
-                    departmentAlerts={group.departmentAlerts}
-                    directives={departmentDirectivesById[group.department_id]}
-                    statusFilter={statusFilter}
-                    focusedAlertId={focusedAlertId}
-                    highlightedAlertId={highlightedAlertId}
-                    onIssueDirective={openDepartmentDirective}
-                  />
-                ))
+                <AnimatePresence initial={false} mode="popLayout">
+                  {visibleDepartmentGroups.map((group) => (
+                    <FadeIn key={group.department_id} layout>
+                      <DepartmentAlertGroup
+                        summary={group}
+                        departmentAlerts={group.departmentAlerts}
+                        directives={departmentDirectivesById[group.department_id]}
+                        statusFilter={statusFilter}
+                        focusedAlertId={focusedAlertId}
+                        highlightedAlertId={highlightedAlertId}
+                        onIssueDirective={openDepartmentDirective}
+                      />
+                    </FadeIn>
+                  ))}
+                </AnimatePresence>
               )
             ) : (
-              visibleEmployeeGroups.map((group) => (
-                <EmployeeAlertGroup
-                  key={group.employee_id}
-                  employeeName={group.employee_name}
-                  employeeCode={group.employee_code}
-                  openAlerts={group.openAlerts}
-                  resolvedAlerts={group.resolvedAlerts}
-                  statusFilter={statusFilter}
-                  coordinationSuggestions={coordinationSuggestions}
-                  highlightedAlertId={highlightedAlertId}
-                  focusedAlertId={focusedAlertId}
-                  resolvingIds={resolvingIds}
-                  onResolve={(alert) => setSelectedAlert(alert)}
-                  onQuickResolve={handleQuickResolve}
-                  onApplyCoordination={handleApplyCoordination}
-                  onEditCoordination={openCoordinationEditor}
-                  role={role}
-                />
-              ))
+              <AnimatePresence initial={false} mode="popLayout">
+                {visibleEmployeeGroups.map((group) => (
+                  <FadeIn key={group.employee_id} layout>
+                    <EmployeeAlertGroup
+                      employeeName={group.employee_name}
+                      employeeCode={group.employee_code}
+                      openAlerts={group.openAlerts}
+                      resolvedAlerts={group.resolvedAlerts}
+                      statusFilter={statusFilter}
+                      coordinationSuggestions={coordinationSuggestions}
+                      highlightedAlertId={highlightedAlertId}
+                      focusedAlertId={focusedAlertId}
+                      resolvingIds={resolvingIds}
+                      onResolve={(alert) => setSelectedAlert(alert)}
+                      onQuickResolve={handleQuickResolve}
+                      onApplyCoordination={handleApplyCoordination}
+                      onAiResolved={applyResolvedAlert}
+                      onAiCoordinationApplied={handleAiCoordinationApplied}
+                      onEditCoordination={openCoordinationEditor}
+                      role={role}
+                    />
+                  </FadeIn>
+                ))}
+              </AnimatePresence>
             )}
           </div>
         </section>
@@ -748,24 +852,20 @@ function AlertsPage() {
           <form className="space-y-4" onSubmit={handleResolve}>
             <label className="block text-sm font-medium text-slate-700">
               Ghi chú xử lý
-              <textarea
-                className="form-input mt-1 min-h-32"
+              <Textarea
+                className="mt-1 min-h-32"
                 value={resolutionNote}
                 onChange={(event) => setResolutionNote(event.target.value)}
                 placeholder="Ví dụ: Đã phân bổ bớt công việc cho nhân viên khác."
               />
             </label>
             <div className="flex justify-end gap-3">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setSelectedAlert(null)}
-              >
+              <Button type="button" variant="secondary" onClick={() => setSelectedAlert(null)}>
                 Hủy
-              </button>
-              <button type="submit" className="primary-button" disabled={isSaving}>
+              </Button>
+              <Button type="submit" disabled={isSaving} loading={isSaving}>
                 {isSaving ? 'Đang lưu...' : 'Xác nhận đã xử lý'}
-              </button>
+              </Button>
             </div>
           </form>
         </Modal>
@@ -780,8 +880,8 @@ function AlertsPage() {
           <form className="space-y-4" onSubmit={handleCoordinationSubmit}>
             <label className="block text-sm font-medium text-slate-700">
               Nhân viên nhận việc
-              <select
-                className="form-input mt-1"
+              <Select
+                className="mt-1"
                 value={coordinationForm.target_employee_id}
                 onChange={(event) =>
                   setCoordinationForm((current) => ({
@@ -796,12 +896,12 @@ function AlertsPage() {
                     {candidate.tasks_completed} công việc
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label className="block text-sm font-medium text-slate-700">
               Số công việc điều phối
-              <select
-                className="form-input mt-1"
+              <Select
+                className="mt-1"
                 value={coordinationForm.tasks_to_transfer}
                 onChange={(event) =>
                   setCoordinationForm((current) => ({
@@ -812,12 +912,12 @@ function AlertsPage() {
               >
                 <option value="1">1 công việc</option>
                 <option value="2">2 công việc</option>
-              </select>
+              </Select>
             </label>
             <label className="block text-sm font-medium text-slate-700">
               Ghi chú điều phối
-              <textarea
-                className="form-input mt-1 min-h-24"
+              <Textarea
+                className="mt-1 min-h-24"
                 value={coordinationForm.note}
                 onChange={(event) =>
                   setCoordinationForm((current) => ({
@@ -829,16 +929,14 @@ function AlertsPage() {
               />
             </label>
             <div className="flex justify-end gap-3">
-              <button
+              <Button
                 type="button"
-                className="secondary-button"
+                variant="secondary"
                 onClick={() => setSelectedCoordination(null)}
               >
                 Hủy
-              </button>
-              <button type="submit" className="primary-button">
-                Áp dụng phương án đã chỉnh sửa
-              </button>
+              </Button>
+              <Button type="submit">Áp dụng phương án đã chỉnh sửa</Button>
             </div>
           </form>
         </Modal>
@@ -858,8 +956,8 @@ function AlertsPage() {
             )}
             <label className="block text-sm font-medium text-slate-700">
               Loại cảnh báo
-              <select
-                className="form-input mt-1"
+              <Select
+                className="mt-1"
                 value={departmentDirectiveForm.alert_type}
                 onChange={(event) =>
                   setDepartmentDirectiveForm((current) => ({
@@ -871,12 +969,12 @@ function AlertsPage() {
                 <option value="all">Tất cả loại</option>
                 <option value="early_warning">Dấu hiệu sớm</option>
                 <option value="overload">Quá tải</option>
-              </select>
+              </Select>
             </label>
             <label className="block text-sm font-medium text-slate-700">
               Mức độ cảnh báo
-              <select
-                className="form-input mt-1"
+              <Select
+                className="mt-1"
                 value={departmentDirectiveForm.severity}
                 onChange={(event) =>
                   setDepartmentDirectiveForm((current) => ({
@@ -888,7 +986,7 @@ function AlertsPage() {
                 <option value="all">Tất cả mức độ</option>
                 <option value="medium">Mức trung bình</option>
                 <option value="high">Mức cao</option>
-              </select>
+              </Select>
             </label>
             {selectedDepartmentHasOverlappingDirective ? (
               <p className="rounded-lg bg-amber-50 p-3 text-sm font-semibold text-amber-900">
@@ -905,8 +1003,8 @@ function AlertsPage() {
             )}
             <label className="block text-sm font-medium text-slate-700">
               Ghi chú chỉ thị (tùy chọn)
-              <textarea
-                className="form-input mt-1 min-h-24"
+              <Textarea
+                className="mt-1 min-h-24"
                 maxLength={1000}
                 value={departmentDirectiveForm.note}
                 onChange={(event) =>
@@ -919,25 +1017,25 @@ function AlertsPage() {
               />
             </label>
             <div className="flex justify-end gap-3">
-              <button
+              <Button
                 type="button"
-                className="secondary-button"
+                variant="secondary"
                 onClick={() => setSelectedDepartment(null)}
                 disabled={departmentDirectiveSaving}
               >
                 Hủy
-              </button>
-              <button
+              </Button>
+              <Button
                 type="submit"
-                className="primary-button"
                 disabled={
                   departmentDirectiveSaving ||
                   selectedDepartmentOpenCount === 0 ||
                   selectedDepartmentHasOverlappingDirective
                 }
+                loading={departmentDirectiveSaving}
               >
                 {departmentDirectiveSaving ? 'Đang gửi...' : 'Gửi chỉ thị'}
-              </button>
+              </Button>
             </div>
           </form>
         </Modal>
@@ -955,7 +1053,7 @@ function NewAlertBanner({ banners, onViewNewest, onDismiss }) {
     <div
       role="status"
       aria-live="polite"
-      className={`sticky top-4 z-20 mt-5 rounded-xl border px-4 py-3 shadow-lg transition-colors sm:px-5 ${
+      className={`sticky top-4 z-20 mt-5 rounded-xl border px-4 py-3 shadow-lg transition-colors duration-motion-standard ease-motion-standard sm:px-5 ${
         hasHighSeverity
           ? 'border-red-300 bg-red-50 text-red-900'
           : 'border-amber-300 bg-amber-50 text-amber-900'
@@ -984,7 +1082,7 @@ function NewAlertBanner({ banners, onViewNewest, onDismiss }) {
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
-            className={`rounded-lg px-3 py-2 text-xs font-bold transition ${
+            className={`rounded-lg px-3 py-2 text-xs font-bold transition duration-motion-micro ease-motion-standard ${
               hasHighSeverity
                 ? 'bg-red-600 text-white hover:bg-red-700'
                 : 'bg-amber-500 text-white hover:bg-amber-600'
@@ -995,7 +1093,7 @@ function NewAlertBanner({ banners, onViewNewest, onDismiss }) {
           </button>
           <button
             type="button"
-            className="rounded-lg px-2 py-2 text-lg leading-none opacity-70 transition hover:bg-black/5 hover:opacity-100"
+            className="rounded-lg px-2 py-2 text-lg leading-none opacity-70 transition duration-motion-micro ease-motion-standard hover:bg-black/5 hover:opacity-100"
             onClick={onDismiss}
             aria-label="Đóng thông báo cảnh báo mới"
           >
@@ -1023,7 +1121,7 @@ function WeeklyAlertSparkline({ data }) {
         </div>
         <span className="shrink-0 text-xs font-semibold text-slate-500">{total} cảnh báo</span>
       </div>
-      <p className="mt-2 text-[11px] text-slate-400">
+      <p className="mt-2 text-xs text-slate-400">
         Số trên cột là số cảnh báo trong ngày; di chuột vào từng cột để xem ngày cụ thể.
       </p>
       <div className="mt-4 w-full overflow-x-auto pb-1">
@@ -1031,7 +1129,7 @@ function WeeklyAlertSparkline({ data }) {
           className="flex h-32 min-w-[42rem] items-end gap-0.5 sm:gap-1"
           aria-label="Biểu đồ số cảnh báo theo từng ngày"
         >
-          {data.map((day) => (
+          {data.map((day, index) => (
             <div
               key={day.key}
               className={`flex h-full min-w-0 flex-1 flex-col items-center justify-end ${
@@ -1043,10 +1141,13 @@ function WeeklyAlertSparkline({ data }) {
                   {day.count > 0 ? day.count : ''}
                 </span>
                 <div
-                  className={`w-full rounded-t-md transition-all duration-500 hover:bg-brand-700 ${
+                  className={`alert-trend-bar w-full rounded-t-md transition-all duration-motion-standard ease-motion-standard hover:bg-brand-700 ${
                     day.count > 0 ? 'bg-brand-500' : 'bg-slate-200'
                   }`}
-                  style={{ height: `${day.height}%` }}
+                  style={{
+                    height: `${day.height}%`,
+                    '--trend-delay': `${Math.min(index * 18, 450)}ms`,
+                  }}
                   title={`${day.fullLabel}: ${day.count} cảnh báo`}
                   aria-label={`${day.fullLabel}: ${day.count} cảnh báo`}
                 />
@@ -1153,7 +1254,7 @@ function DepartmentAlertGroup({
   return (
     <article
       id={`department-alert-card-${summary.department_id}`}
-      className={`rounded-2xl border p-5 transition-colors sm:p-6 ${
+      className={`rounded-2xl border p-5 transition-colors duration-motion-standard ease-motion-standard sm:p-6 ${
         isHighlighted || isFocused
           ? 'border-brand-400 bg-brand-50/40 ring-2 ring-brand-200'
           : 'border-slate-200 bg-slate-50/60'
@@ -1214,7 +1315,7 @@ function DepartmentAlertGroup({
             <span key={directive.id} className="rounded-full bg-white px-2.5 py-1 font-semibold">
               {formatDepartmentDirectiveFilter(directive.selected_alert_type)} ·{' '}
               {formatDepartmentDirectiveFilter(directive.selected_severity)} ·{' '}
-              {directive.status === 'pending' ? 'Đang chờ' : 'Đã xác nhận'}
+              {getDirectiveStatusLabel('alert', directive.status)}
             </span>
           ))}
         </div>
@@ -1275,7 +1376,7 @@ function DepartmentStatusFilter({ label, count, active, tone = 'slate', onClick 
   return (
     <button
       type="button"
-      className={`rounded-full border px-3 py-1.5 transition ${toneClasses[tone]}`}
+      className={`rounded-full border px-3 py-1.5 transition duration-motion-micro ease-motion-standard ${toneClasses[tone]}`}
       aria-pressed={active}
       onClick={onClick}
     >
@@ -1299,10 +1400,10 @@ function DepartmentMetric({ label, value, tone, statusLabel, employeeNames = [] 
       >
         <p className="text-xs font-semibold uppercase tracking-wide opacity-70">{label}</p>
         <p className="mt-1 text-sm font-bold">{value}</p>
-        <p className="mt-1 text-[11px] font-medium opacity-65">{statusLabel}</p>
+        <p className="mt-1 text-xs font-medium opacity-65">{statusLabel}</p>
       </div>
       {canShowEmployees && (
-        <div className="invisible absolute left-0 top-full z-30 mt-2 w-64 rounded-xl border border-slate-200 bg-white p-3 text-left opacity-0 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+        <div className="invisible absolute left-0 top-full z-30 mt-2 w-64 translate-y-1 rounded-xl border border-slate-200 bg-white p-3 text-left opacity-0 shadow-xl transition duration-motion-micro ease-motion-standard group-hover:visible group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100">
           <p className="text-xs font-bold text-slate-800">Nhân viên liên quan</p>
           {employeeNames.length ? (
             <ul className="mt-2 space-y-1 text-xs text-slate-600">
@@ -1375,13 +1476,21 @@ function EmployeeAlertGroup({
   onResolve,
   onQuickResolve,
   onApplyCoordination,
+  onAiResolved,
+  onAiCoordinationApplied,
   onEditCoordination,
   role,
 }) {
   const hasFocusedAlert = [...openAlerts, ...resolvedAlerts].some(
     (alert) => alert.id === focusedAlertId,
   )
-  const [isCollapsed, setIsCollapsed] = useState(() => openAlerts.length === 0 && !hasFocusedAlert)
+  const [isCollapsed, setIsCollapsed] = useState(() => {
+    if (hasFocusedAlert) return false
+    if (statusFilter === 'resolved') return resolvedAlerts.length === 0
+    if (statusFilter === 'open') return openAlerts.length === 0
+    // Bộ lọc "Tất cả" phải hiển thị cả nhóm chỉ có cảnh báo đã xử lý.
+    return false
+  })
   const showOpen = statusFilter !== 'resolved'
   const showResolved = statusFilter !== 'open'
   const showBothColumns = showOpen && showResolved
@@ -1389,26 +1498,32 @@ function EmployeeAlertGroup({
   useEffect(() => {
     if (hasFocusedAlert) {
       setIsCollapsed(false)
-    } else if (openAlerts.length === 0) {
-      setIsCollapsed(true)
+    } else if (statusFilter === 'resolved') {
+      // Khi lọc "Đã xử lý", nhóm phải mở nếu có cảnh báo đã xử lý.
+      setIsCollapsed(resolvedAlerts.length === 0)
+    } else if (statusFilter === 'open') {
+      setIsCollapsed(openAlerts.length === 0)
     }
-  }, [hasFocusedAlert, openAlerts.length])
+  }, [hasFocusedAlert, openAlerts.length, resolvedAlerts.length, statusFilter])
 
   function renderAlert(alert) {
     return (
-      <AlertCard
-        key={alert.id}
-        id={`alert-card-${alert.id}`}
-        alert={alert}
-        onResolve={() => onResolve(alert)}
-        coordination={coordinationSuggestions[alert.id]}
-        isJustProcessed={highlightedAlertId === alert.id}
-        onApplyCoordination={() => onApplyCoordination(alert)}
-        onEditCoordination={() => onEditCoordination(alert, coordinationSuggestions[alert.id])}
-        onQuickResolve={() => onQuickResolve(alert)}
-        isResolving={resolvingIds.has(alert.id)}
-        role={role}
-      />
+      <FadeIn key={alert.id} layout>
+        <AlertCard
+          id={`alert-card-${alert.id}`}
+          alert={alert}
+          onResolve={() => onResolve(alert)}
+          coordination={coordinationSuggestions[alert.id]}
+          isJustProcessed={highlightedAlertId === alert.id}
+          onApplyCoordination={() => onApplyCoordination(alert)}
+          onAiResolved={onAiResolved}
+          onAiCoordinationApplied={(plan) => onAiCoordinationApplied(alert, plan)}
+          onEditCoordination={() => onEditCoordination(alert, coordinationSuggestions[alert.id])}
+          onQuickResolve={() => onQuickResolve(alert)}
+          isResolving={resolvingIds.has(alert.id)}
+          role={role}
+        />
+      </FadeIn>
     )
   }
 
@@ -1425,7 +1540,7 @@ function EmployeeAlertGroup({
           </span>
           <button
             type="button"
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-brand-400 hover:text-brand-700"
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition duration-motion-micro ease-motion-standard hover:border-brand-400 hover:text-brand-700"
             onClick={() => setIsCollapsed((current) => !current)}
             aria-expanded={!isCollapsed}
             aria-label={`${isCollapsed ? 'Xem chi tiết' : 'Thu gọn'} cảnh báo của ${employeeName}`}
@@ -1433,7 +1548,7 @@ function EmployeeAlertGroup({
             {isCollapsed ? 'Xem chi tiết' : 'Thu gọn'}
             <svg
               aria-hidden="true"
-              className={`h-4 w-4 transition-transform ${isCollapsed ? '' : 'rotate-180'}`}
+              className={`h-4 w-4 transition-transform duration-motion-micro ease-motion-standard ${isCollapsed ? '' : 'rotate-180'}`}
               viewBox="0 0 20 20"
               fill="currentColor"
             >
@@ -1447,43 +1562,49 @@ function EmployeeAlertGroup({
         </div>
       </div>
 
-      {!isCollapsed && (
-        <div className={`mt-4 grid grid-cols-1 gap-4 ${showBothColumns ? 'md:grid-cols-2' : ''}`}>
-          {showOpen && (
-            <div className="min-w-0 rounded-xl border border-amber-200 bg-white p-3 sm:p-4">
-              <h3 className="mb-3 text-sm font-bold text-amber-900">
-                Chưa xử lý ({openAlerts.length})
-              </h3>
-              <div className="space-y-3">
-                {openAlerts.length ? (
-                  openAlerts.map(renderAlert)
-                ) : (
-                  <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-400">
-                    Không có cảnh báo chưa xử lý
-                  </p>
-                )}
+      <AnimatePresence initial={false}>
+        {!isCollapsed && (
+          <div className={`mt-4 grid grid-cols-1 gap-4 ${showBothColumns ? 'md:grid-cols-2' : ''}`}>
+            {showOpen && (
+              <div className="min-w-0 rounded-xl border border-amber-200 bg-white p-3 sm:p-4">
+                <h3 className="mb-3 text-sm font-bold text-amber-900">
+                  Chưa xử lý ({openAlerts.length})
+                </h3>
+                <div className="space-y-3">
+                  {openAlerts.length ? (
+                    <AnimatePresence initial={false} mode="popLayout">
+                      {openAlerts.map(renderAlert)}
+                    </AnimatePresence>
+                  ) : (
+                    <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-400">
+                      Không có cảnh báo chưa xử lý
+                    </p>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {showResolved && (
-            <div className="min-w-0 rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
-              <h3 className="mb-3 text-sm font-bold text-slate-700">
-                Đã xử lý ({resolvedAlerts.length})
-              </h3>
-              <div className="space-y-3">
-                {resolvedAlerts.length ? (
-                  resolvedAlerts.map(renderAlert)
-                ) : (
-                  <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-400">
-                    Không có cảnh báo đã xử lý
-                  </p>
-                )}
+            {showResolved && (
+              <div className="min-w-0 rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
+                <h3 className="mb-3 text-sm font-bold text-slate-700">
+                  Đã xử lý ({resolvedAlerts.length})
+                </h3>
+                <div className="space-y-3">
+                  {resolvedAlerts.length ? (
+                    <AnimatePresence initial={false} mode="popLayout">
+                      {resolvedAlerts.map(renderAlert)}
+                    </AnimatePresence>
+                  ) : (
+                    <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-400">
+                      Không có cảnh báo đã xử lý
+                    </p>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
-        </div>
-      )}
+            )}
+          </div>
+        )}
+      </AnimatePresence>
     </section>
   )
 }
@@ -1494,6 +1615,8 @@ function AlertCard({
   onResolve,
   coordination,
   onApplyCoordination,
+  onAiResolved,
+  onAiCoordinationApplied,
   onEditCoordination,
   isJustProcessed = false,
   onQuickResolve,
@@ -1509,7 +1632,7 @@ function AlertCard({
       id={id}
       className={`rounded-xl border border-l-4 p-5 ${
         isJustProcessed
-          ? 'border-emerald-300 border-l-emerald-500 bg-emerald-50 ring-2 ring-emerald-200 transition-colors duration-700'
+          ? 'border-emerald-300 border-l-emerald-500 bg-emerald-50 ring-2 ring-emerald-200 transition-colors duration-motion-standard ease-motion-standard'
           : isResolved
             ? 'border-slate-200 border-l-slate-300 bg-white'
             : isHigh
@@ -1598,6 +1721,13 @@ function AlertCard({
               </div>
             </div>
           ) : null}
+          <AiAlertProposalCard
+            alert={alert}
+            coordination={coordination}
+            role={role}
+            onResolved={onAiResolved}
+            onCoordinationApplied={onAiCoordinationApplied}
+          />
         </div>
         {!isResolved && onResolve && (
           <div className="flex shrink-0 flex-wrap gap-2 sm:flex-col sm:items-stretch">
@@ -1729,7 +1859,7 @@ function FilterChip({ label, count, active, onClick, tone = 'brand' }) {
   return (
     <button
       type="button"
-      className={`rounded-full border px-3 py-1.5 transition ${toneClasses[tone]}`}
+      className={`rounded-full border px-3 py-1.5 transition duration-motion-micro ease-motion-standard ${toneClasses[tone]}`}
       aria-pressed={active}
       onClick={onClick}
     >

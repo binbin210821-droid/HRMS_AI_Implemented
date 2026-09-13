@@ -1,10 +1,13 @@
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 
 from app.api.dependencies import get_current_user, get_department_scope, require_role
 from app.core.database import get_mongo_database
+from app.core.pagination import PaginationParams, get_pagination, paginate_v1
 from app.core.time import BusinessClock
+from app.infrastructure.idempotency import IdempotencyContext, complete_idempotency, idempotent
+from app.infrastructure.rate_limit import rate_limit_group
 from app.models.task import (
     AcknowledgeDepartmentTaskDirectiveRequest,
     DepartmentTaskDirectiveResponse,
@@ -22,29 +25,54 @@ from app.models.user import CurrentUser, UserRole
 from app.repositories.task_repository import TaskRepository
 from app.services.task_service import TaskService
 
-router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
+router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
 
 def get_task_service() -> TaskService:
     return TaskService(TaskRepository(get_mongo_database().get_database()), clock=BusinessClock())
 
 
-@router.get("", response_model=list[TaskResponse], summary="Danh sách công việc")
+@router.get(
+    "",
+    response_model=list[TaskResponse],
+    summary="Danh sách công việc",
+    dependencies=[Depends(rate_limit_group("read_operational"))],
+)
 async def list_tasks(
+    request: Request,
+    response: Response,
     employee_id: str | None = Query(default=None),
     task_status: TaskStatus | None = Query(default=None, alias="status"),
     overdue_only: bool = Query(default=False),
+    pagination: PaginationParams = Depends(get_pagination),
     scope=Depends(get_department_scope),
     _: CurrentUser = Depends(get_current_user),
     service: TaskService = Depends(get_task_service),
 ) -> list[TaskResponse]:
-    return await service.list(scope, employee_id, task_status, overdue_only)
+    if request.url.path.startswith("/api/v1/"):
+        return paginate_v1(
+            request,
+            response,
+            await service.list_page(
+                scope,
+                employee_id,
+                task_status,
+                overdue_only,
+                pagination.offset,
+                pagination.limit,
+            ),
+            pagination,
+        )
+    return paginate_v1(
+        request, response, await service.list(scope, employee_id, task_status, overdue_only), pagination
+    )
 
 
 @router.get(
     "/leadership-overview",
     response_model=LeadershipTaskOverviewResponse,
     summary="Tổng quan công việc theo phòng ban",
+    dependencies=[Depends(rate_limit_group("read_heavy"))],
 )
 async def get_leadership_overview(
     range_preset: Literal["7d", "30d", "90d"] = Query(default="30d", alias="range"),
@@ -58,11 +86,12 @@ async def get_leadership_overview(
     "/departments/{department_id}/portfolio",
     response_model=DepartmentTaskPortfolioResponse,
     summary="Danh mục công việc phòng ban cho Lãnh đạo",
+    dependencies=[Depends(rate_limit_group("read_heavy"))],
 )
 async def get_department_portfolio(
     department_id: str,
     range_preset: Literal["7d", "30d", "90d"] = Query(default="30d", alias="range"),
-    focus: Literal["all", "overdue", "due_soon", "high_priority_open", "at_risk"] = Query(
+    focus: Literal["all", "overdue", "not_directed", "due_soon", "high_priority_open", "at_risk"] = Query(
         default="all"
     ),
     _: CurrentUser = Depends(require_role(UserRole.LEADERSHIP)),
@@ -75,19 +104,37 @@ async def get_department_portfolio(
     "/department-directives",
     response_model=list[DepartmentTaskDirectiveResponse],
     summary="Danh sách chỉ thị công việc cấp phòng ban",
+    dependencies=[Depends(rate_limit_group("read_light"))],
 )
 async def list_department_task_directives(
+    request: Request,
+    response: Response,
     directive_status: Literal[
         "pending", "acknowledged", "submitted", "accepted", "needs_revision"
     ]
     | None = Query(
         default=None, alias="status"
     ),
+    pagination: PaginationParams = Depends(get_pagination),
     scope=Depends(get_department_scope),
     _: CurrentUser = Depends(get_current_user),
     service: TaskService = Depends(get_task_service),
 ) -> list[DepartmentTaskDirectiveResponse]:
-    return await service.list_department_directives(scope, directive_status)
+    if request.url.path.startswith("/api/v1/"):
+        return paginate_v1(
+            request,
+            response,
+            await service.list_department_directives_page(
+                scope, directive_status, pagination.offset, pagination.limit
+            ),
+            pagination,
+        )
+    return paginate_v1(
+        request,
+        response,
+        await service.list_department_directives(scope, directive_status),
+        pagination,
+    )
 
 
 @router.post(
@@ -95,22 +142,36 @@ async def list_department_task_directives(
     response_model=DepartmentTaskDirectiveResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Ra chỉ thị công việc cho phòng ban",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
 )
 async def issue_department_task_directive(
     department_id: str,
     request: IssueDepartmentTaskDirectiveRequest,
     current_user: CurrentUser = Depends(require_role(UserRole.LEADERSHIP)),
     service: TaskService = Depends(get_task_service),
+    idempotency: IdempotencyContext | None = Depends(idempotent("task_directive")),
 ) -> DepartmentTaskDirectiveResponse:
-    return await service.issue_department_directive(
+    result = await service.issue_department_directive(
         department_id, current_user.user_id, request
     )
+    await complete_idempotency(idempotency, result, status_code=201)
+    return result
 
 
+@router.patch(
+    "/department-directives/{directive_id}/acknowledgement",
+    response_model=DepartmentTaskDirectiveResponse,
+    summary="Xác nhận chỉ thị công việc cấp phòng ban",
+    name="acknowledge_department_task_directive_v1",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
+)
 @router.post(
     "/department-directives/{directive_id}/acknowledge",
     response_model=DepartmentTaskDirectiveResponse,
-    summary="Xác nhận chỉ thị công việc cấp phòng ban",
+    summary="Deprecated: xác nhận chỉ thị công việc cấp phòng ban",
+    deprecated=True,
+    name="acknowledge_department_task_directive_legacy",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
 )
 async def acknowledge_department_task_directive(
     directive_id: str,
@@ -124,10 +185,20 @@ async def acknowledge_department_task_directive(
     )
 
 
+@router.patch(
+    "/department-directives/{directive_id}/submission",
+    response_model=DepartmentTaskDirectiveResponse,
+    summary="Manager gửi nghiệm thu chỉ thị công việc",
+    name="submit_department_task_directive_v1",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
+)
 @router.post(
     "/department-directives/{directive_id}/submit",
     response_model=DepartmentTaskDirectiveResponse,
-    summary="Manager gửi nghiệm thu chỉ thị công việc",
+    summary="Deprecated: Manager gửi nghiệm thu chỉ thị công việc",
+    deprecated=True,
+    name="submit_department_task_directive_legacy",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
 )
 async def submit_department_task_directive(
     directive_id: str,
@@ -141,10 +212,20 @@ async def submit_department_task_directive(
     )
 
 
+@router.patch(
+    "/department-directives/{directive_id}/acceptance",
+    response_model=DepartmentTaskDirectiveResponse,
+    summary="Lãnh đạo nghiệm thu chỉ thị công việc",
+    name="accept_department_task_directive_v1",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
+)
 @router.post(
     "/department-directives/{directive_id}/accept",
     response_model=DepartmentTaskDirectiveResponse,
-    summary="Lãnh đạo nghiệm thu chỉ thị công việc",
+    summary="Deprecated: Lãnh đạo nghiệm thu chỉ thị công việc",
+    deprecated=True,
+    name="accept_department_task_directive_legacy",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
 )
 async def accept_department_task_directive(
     directive_id: str,
@@ -157,10 +238,20 @@ async def accept_department_task_directive(
     )
 
 
+@router.patch(
+    "/department-directives/{directive_id}/revision-request",
+    response_model=DepartmentTaskDirectiveResponse,
+    summary="Yêu cầu xử lý lại chỉ thị công việc",
+    name="request_task_directive_revision_v1",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
+)
 @router.post(
     "/department-directives/{directive_id}/request-revision",
     response_model=DepartmentTaskDirectiveResponse,
-    summary="Yêu cầu xử lý lại chỉ thị công việc",
+    summary="Deprecated: yêu cầu xử lý lại chỉ thị công việc",
+    deprecated=True,
+    name="request_task_directive_revision_legacy",
+    dependencies=[Depends(rate_limit_group("directive_action"))],
 )
 async def request_task_directive_revision(
     directive_id: str,
@@ -173,7 +264,12 @@ async def request_task_directive_revision(
     )
 
 
-@router.get("/{task_id}", response_model=TaskResponse, summary="Chi tiết công việc")
+@router.get(
+    "/{task_id}",
+    response_model=TaskResponse,
+    summary="Chi tiết công việc",
+    dependencies=[Depends(rate_limit_group("read_light"))],
+)
 async def get_task(
     task_id: str,
     scope=Depends(get_department_scope),
@@ -188,6 +284,7 @@ async def get_task(
     response_model=TaskResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Tạo công việc",
+    dependencies=[Depends(rate_limit_group("mutation"))],
 )
 async def create_task(
     request: TaskCreate,
@@ -198,18 +295,28 @@ async def create_task(
     return await service.create(request, scope, current_user.user_id)
 
 
-@router.patch("/{task_id}", response_model=TaskResponse, summary="Cập nhật công việc")
+@router.patch(
+    "/{task_id}",
+    response_model=TaskResponse,
+    summary="Cập nhật công việc",
+    dependencies=[Depends(rate_limit_group("mutation"))],
+)
 async def update_task(
     task_id: str,
     request: TaskUpdate,
     scope=Depends(get_department_scope),
-    _: CurrentUser = Depends(require_role(UserRole.MANAGER)),
+    current_user: CurrentUser = Depends(require_role(UserRole.MANAGER)),
     service: TaskService = Depends(get_task_service),
 ) -> TaskResponse:
-    return await service.update(task_id, request, scope)
+    return await service.update(task_id, request, scope, current_user.user_id)
 
 
-@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Xóa công việc")
+@router.delete(
+    "/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Xóa công việc",
+    dependencies=[Depends(rate_limit_group("mutation"))],
+)
 async def delete_task(
     task_id: str,
     scope=Depends(get_department_scope),

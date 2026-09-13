@@ -1,17 +1,32 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
-import { FadeIn } from '../components/animations/index.js'
+import { AnimatedTableRows, FadeIn } from '../components/animations/index.js'
+import { useActionFeedback } from '../components/feedback/index.js'
 import MainLayout from '../components/layout/MainLayout.jsx'
 import Modal from '../components/Modal.jsx'
 import { useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { invalidateResource } from '../services/requestCoordinator.js'
 import { listDepartments } from '../features/departments/departmentsApi.js'
 import { listEmployees } from '../features/employees/employeesApi.js'
 import CalendarView from '../features/tasks/components/CalendarView.jsx'
+import AiOverdueTaskProposalCard from '../features/tasks/AiOverdueTaskProposalCard.jsx'
 import LeadershipTasksOverview from '../features/tasks/LeadershipTasksOverview.jsx'
 import ManagerTaskDirectives from '../features/tasks/ManagerTaskDirectives.jsx'
 import { createTask, deleteTask, listTasks, updateTask } from '../features/tasks/tasksApi.js'
 import { useAuthStore } from '../stores/authStore.js'
+import {
+  Button,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Textarea,
+} from '../components/ui/index.js'
 
 const STATUS_LABELS = {
   todo: 'Chưa bắt đầu',
@@ -37,6 +52,8 @@ const emptyForm = {
   due_date: '',
   priority: 'medium',
   status: 'todo',
+  estimated_effort_hours: '',
+  required_skills: '',
   subtasks: '',
 }
 
@@ -47,6 +64,7 @@ function TasksPage() {
 
 function ManagerTasksPage() {
   const { role } = useAuthStore()
+  const { confirmAction, notifyActionSuccess, notifyActionError } = useActionFeedback()
   const [searchParams, setSearchParams] = useSearchParams()
   const [tasks, setTasks] = useState([])
   const [employees, setEmployees] = useState([])
@@ -135,6 +153,7 @@ function ManagerTasksPage() {
 
   async function refreshTasks() {
     try {
+      invalidateResource('tasks')
       setTasks(await listTasks())
     } catch (requestError) {
       setError(requestError.message || 'Không thể cập nhật công việc mới.')
@@ -203,6 +222,8 @@ function ManagerTasksPage() {
       due_date: task.due_date,
       priority: task.priority,
       status: task.status,
+      estimated_effort_hours: task.estimated_effort_hours || '',
+      required_skills: (task.required_skills || []).join(', '),
       subtasks: (task.subtasks || []).join('\n'),
     })
     setModal({ mode: 'edit', task })
@@ -224,39 +245,98 @@ function ManagerTasksPage() {
 
   async function handleSubmit(event) {
     event.preventDefault()
-    setIsSaving(true)
-    setError('')
     const payload = {
       ...form,
+      estimated_effort_hours: form.estimated_effort_hours
+        ? Number(form.estimated_effort_hours)
+        : null,
+      required_skills: form.required_skills
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
       subtasks: form.subtasks
         .split('\n')
         .map((item) => item.trim())
         .filter(Boolean),
     }
+    const isCreating = modal.mode === 'create'
+    const employeeName = employees.find((employee) => employee.id === form.employee_id)?.full_name
+    const confirmed = await confirmAction({
+      title: isCreating ? 'Xác nhận thêm công việc' : 'Xác nhận thay đổi công việc',
+      description: isCreating
+        ? 'Công việc sẽ được tạo và giao theo đúng thông tin bên dưới.'
+        : 'Thông tin công việc sẽ được cập nhật theo nội dung bạn đã chỉnh sửa.',
+      details: [
+        `Tên công việc: ${payload.title}`,
+        `Người phụ trách: ${employeeName || 'Chưa xác định'}`,
+        `Hạn hoàn thành: ${payload.due_date || 'Chưa xác định'}`,
+        `Trạng thái: ${STATUS_LABELS[payload.status] || payload.status}`,
+      ],
+      confirmLabel: isCreating ? 'Xác nhận thêm' : 'Xác nhận thay đổi',
+    })
+    if (!confirmed) return
+    setIsSaving(true)
+    setError('')
     try {
-      if (modal.mode === 'create') await createTask(payload)
-      else await updateTask(modal.task.id, payload)
+      const saved = isCreating
+        ? await createTask(payload)
+        : await updateTask(modal.task.id, payload)
       setModal(null)
       await loadData()
+      notifyActionSuccess({
+        title: isCreating ? 'Đã thêm công việc' : 'Đã thay đổi công việc',
+        message: `Công việc “${saved?.title || payload.title}” đã được lưu thành công.`,
+        details: [
+          `Người phụ trách: ${saved?.employee_name || employeeName || 'Chưa xác định'}`,
+          `Hạn hoàn thành: ${saved?.due_date || payload.due_date || 'Chưa xác định'}`,
+        ],
+      })
     } catch (requestError) {
-      setError(requestError.message || 'Không thể lưu công việc.')
+      const message = requestError.message || 'Không thể lưu công việc.'
+      setError(message)
+      notifyActionError({ title: 'Chưa lưu công việc', message })
     } finally {
       setIsSaving(false)
     }
   }
 
   async function handleDelete(task) {
-    if (!window.confirm(`Xóa công việc “${task.title}” của ${task.employee_name}?`)) return
+    const confirmed = await confirmAction({
+      title: 'Xác nhận xóa công việc',
+      description: 'Thao tác này sẽ xóa công việc khỏi danh sách theo dõi.',
+      details: [`Công việc: ${task.title}`, `Người phụ trách: ${task.employee_name}`],
+      confirmLabel: 'Xóa công việc',
+      variant: 'danger',
+    })
+    if (!confirmed) return
     setError('')
     try {
       await deleteTask(task.id)
       await loadData()
+      notifyActionSuccess({
+        title: 'Đã xóa công việc',
+        message: `Công việc “${task.title}” đã được xóa thành công.`,
+      })
     } catch (requestError) {
-      setError(requestError.message || 'Không thể xóa công việc.')
+      const message = requestError.message || 'Không thể xóa công việc.'
+      setError(message)
+      notifyActionError({ title: 'Chưa xóa công việc', message })
     }
   }
 
   async function handleTaskDateChange(task, dueDate) {
+    const confirmed = await confirmAction({
+      title: 'Xác nhận thay đổi hạn hoàn thành',
+      description: 'Hạn hoàn thành của công việc sẽ được cập nhật theo ngày bạn vừa chọn.',
+      details: [
+        `Công việc: ${task.title}`,
+        `Người phụ trách: ${task.employee_name}`,
+        `Hạn cũ: ${formatDate(task.due_date)}`,
+        `Hạn mới: ${formatDate(dueDate)}`,
+      ],
+      confirmLabel: 'Xác nhận đổi hạn',
+    })
+    if (!confirmed) return
     const previousTasks = tasks
     setTasks((currentTasks) =>
       currentTasks.map((item) =>
@@ -272,16 +352,23 @@ function ManagerTasksPage() {
     try {
       await updateTask(task.id, { due_date: dueDate })
       await refreshTasks()
+      notifyActionSuccess({
+        title: 'Đã thay đổi hạn hoàn thành',
+        message: `Công việc “${task.title}” đã được cập nhật deadline.`,
+        details: [`Hạn mới: ${formatDate(dueDate)}`],
+      })
     } catch (requestError) {
       setTasks(previousTasks)
-      setError(requestError.message || 'Không thể cập nhật deadline.')
+      const message = requestError.message || 'Không thể cập nhật deadline.'
+      setError(message)
+      notifyActionError({ title: 'Chưa thay đổi deadline', message })
     }
   }
 
   return (
     <MainLayout>
       <FadeIn className="mx-auto max-w-7xl">
-        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <p className="!text-caption !font-semibold !uppercase !tracking-wider !text-brand-600">
@@ -302,22 +389,22 @@ function ManagerTasksPage() {
               >
                 <button
                   type="button"
-                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${viewMode === 'list' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition duration-motion-micro ease-motion-standard ${viewMode === 'list' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
                   onClick={() => setViewMode('list')}
                 >
                   Danh sách
                 </button>
                 <button
                   type="button"
-                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${viewMode === 'calendar' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+                  className={`rounded-lg px-3 py-2 text-sm font-semibold transition duration-motion-micro ease-motion-standard ${viewMode === 'calendar' ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
                   onClick={() => setViewMode('calendar')}
                 >
                   Lịch
                 </button>
               </div>
-              <button type="button" className="primary-button" onClick={() => openCreate()}>
+              <Button type="button" onClick={() => openCreate()}>
                 + Thêm công việc
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -335,8 +422,8 @@ function ManagerTasksPage() {
           <div className="mt-6 grid gap-3 rounded-xl bg-slate-50 p-4 md:grid-cols-[1.5fr_1fr_1fr_1fr]">
             <label className="text-sm font-medium text-slate-700">
               Tìm công việc hoặc nhân viên
-              <input
-                className="form-input mt-1"
+              <Input
+                className="mt-1"
                 placeholder="Nhập từ khóa..."
                 value={filters.search}
                 onChange={(event) => setFilters({ ...filters, search: event.target.value })}
@@ -393,101 +480,120 @@ function ManagerTasksPage() {
           </div>
 
           {viewMode === 'list' ? (
-            <div className="mt-6 overflow-x-auto">
-              <table className="w-full min-w-[1100px] text-left text-sm">
-                <thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3">Công việc</th>
-                    <th className="px-4 py-3">Người phụ trách</th>
-                    <th className="px-4 py-3">Phòng ban</th>
-                    <th className="px-4 py-3">Hạn hoàn thành</th>
-                    <th className="px-4 py-3">Ưu tiên</th>
-                    <th className="px-4 py-3">Trạng thái</th>
-                    <th className="px-4 py-3 text-right">Thao tác</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
+            <div className="mt-6">
+              <Table className="min-w-[1100px]">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Công việc</TableHead>
+                    <TableHead>Người phụ trách</TableHead>
+                    <TableHead>Phòng ban</TableHead>
+                    <TableHead>Hạn hoàn thành</TableHead>
+                    <TableHead>Ưu tiên</TableHead>
+                    <TableHead>Trạng thái</TableHead>
+                    <TableHead className="text-right">Thao tác</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {isLoading && (
-                    <tr>
-                      <td colSpan="7" className="px-4 py-8 text-center text-slate-500">
+                    <TableRow>
+                      <TableCell colSpan="7" className="py-8 text-center text-slate-500">
                         Đang tải...
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   )}
                   {!isLoading && visibleTasks.length === 0 && (
-                    <tr>
-                      <td colSpan="7" className="px-4 py-8 text-center text-slate-500">
+                    <TableRow>
+                      <TableCell colSpan="7" className="py-8 text-center text-slate-500">
                         Chưa có công việc phù hợp.
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   )}
-                  {!isLoading &&
-                    visibleTasks.map((task) => (
-                      <tr key={task.id} className="hover:bg-slate-50">
-                        <td className="max-w-[280px] px-4 py-4">
-                          <p className="font-semibold text-slate-900">{task.title}</p>
-                          {task.description && (
-                            <p className="mt-1 line-clamp-2 text-slate-500">{task.description}</p>
-                          )}
-                          {task.subtasks?.length > 0 && (
-                            <p className="mt-1 text-xs text-slate-400">
-                              {task.subtasks.length} việc con
-                            </p>
-                          )}
-                        </td>
-                        <td className="px-4 py-4">
-                          <p className="font-medium text-slate-900">{task.employee_name}</p>
-                          <p className="text-xs text-slate-500">{task.employee_code}</p>
-                        </td>
-                        <td className="px-4 py-4 text-slate-600">
-                          {departmentMap[task.department_id] || '—'}
-                        </td>
-                        <td className="px-4 py-4">
-                          <span
-                            className={
-                              task.is_overdue ? 'font-semibold text-red-600' : 'text-slate-600'
-                            }
-                          >
-                            {formatDate(task.due_date)}
-                          </span>
-                          {task.is_overdue && <span className="ml-2 status-danger">Quá hạn</span>}
-                        </td>
-                        <td className="px-4 py-4">
-                          <span className={`priority-${task.priority}`}>
-                            {PRIORITY_LABELS[task.priority]}
-                          </span>
-                        </td>
-                        <td className="px-4 py-4">
-                          {(() => {
-                            const statusPresentation = getTaskStatusPresentation(task)
-
-                            return (
-                              <span className={statusPresentation.className}>
-                                {statusPresentation.label}
+                  {!isLoading && (
+                    <AnimatedTableRows>
+                      {visibleTasks.map((task) => (
+                        <Fragment key={task.id}>
+                          <TableRow>
+                            <TableCell className="max-w-[280px]">
+                              <p className="font-semibold text-slate-900">{task.title}</p>
+                              {task.description && (
+                                <p className="mt-1 line-clamp-2 text-slate-500">
+                                  {task.description}
+                                </p>
+                              )}
+                              {task.subtasks?.length > 0 && (
+                                <p className="mt-1 text-xs text-slate-400">
+                                  {task.subtasks.length} việc con
+                                </p>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <p className="font-medium text-slate-900">{task.employee_name}</p>
+                              <p className="text-xs text-slate-500">{task.employee_code}</p>
+                            </TableCell>
+                            <TableCell>{departmentMap[task.department_id] || '—'}</TableCell>
+                            <TableCell>
+                              <span
+                                className={
+                                  task.is_overdue ? 'font-semibold text-red-600' : 'text-slate-600'
+                                }
+                              >
+                                {formatDate(task.due_date)}
                               </span>
-                            )
-                          })()}
-                        </td>
-                        <td className="px-4 py-4 text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            className="table-action"
-                            onClick={() => openEdit(task)}
-                          >
-                            Sửa
-                          </button>
-                          <button
-                            type="button"
-                            className="table-action table-action-danger"
-                            onClick={() => handleDelete(task)}
-                          >
-                            Xóa
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
+                              {task.is_overdue && (
+                                <span className="ml-2 status-danger">Quá hạn</span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <span className={`priority-${task.priority}`}>
+                                {PRIORITY_LABELS[task.priority]}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              {(() => {
+                                const statusPresentation = getTaskStatusPresentation(task)
+
+                                return (
+                                  <span className={statusPresentation.className}>
+                                    {statusPresentation.label}
+                                  </span>
+                                )
+                              })()}
+                            </TableCell>
+                            <TableCell className="whitespace-nowrap text-right">
+                              <button
+                                type="button"
+                                className="table-action"
+                                onClick={() => openEdit(task)}
+                              >
+                                Sửa
+                              </button>
+                              <button
+                                type="button"
+                                className="table-action table-action-danger"
+                                onClick={() => handleDelete(task)}
+                              >
+                                Xóa
+                              </button>
+                            </TableCell>
+                          </TableRow>
+                          {role === 'manager' && task.is_overdue && task.status !== 'done' && (
+                            <TableRow>
+                              <TableCell colSpan="7" className="pb-3 pt-0">
+                                <AiOverdueTaskProposalCard
+                                  task={task}
+                                  role={role}
+                                  employees={employees}
+                                  onApplied={loadData}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </Fragment>
+                      ))}
+                    </AnimatedTableRows>
+                  )}
+                </TableBody>
+              </Table>
             </div>
           ) : (
             <CalendarView
@@ -515,8 +621,8 @@ function ManagerTasksPage() {
             />
             <label className="block text-sm font-medium text-slate-700">
               Mô tả
-              <textarea
-                className="form-input mt-1 min-h-20"
+              <Textarea
+                className="mt-1 min-h-20"
                 value={form.description}
                 onChange={(event) => setForm({ ...form, description: event.target.value })}
               />
@@ -567,26 +673,36 @@ function ManagerTasksPage() {
                 ))}
               </SelectField>
             </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField
+                label="Khối lượng ước tính (giờ)"
+                type="number"
+                value={form.estimated_effort_hours}
+                onChange={(estimated_effort_hours) => setForm({ ...form, estimated_effort_hours })}
+              />
+              <FormField
+                label="Kỹ năng cần thiết"
+                value={form.required_skills}
+                onChange={(required_skills) => setForm({ ...form, required_skills })}
+                placeholder="Ví dụ: báo cáo, excel"
+              />
+            </div>
             <label className="block text-sm font-medium text-slate-700">
               Việc con <span className="font-normal text-slate-400">(mỗi dòng một việc)</span>
-              <textarea
-                className="form-input mt-1 min-h-24"
+              <Textarea
+                className="mt-1 min-h-24"
                 value={form.subtasks}
                 onChange={(event) => setForm({ ...form, subtasks: event.target.value })}
                 placeholder="Ví dụ: Kiểm tra tài liệu"
               />
             </label>
             <div className="flex justify-end gap-3 pt-3">
-              <button type="button" className="secondary-button" onClick={() => setModal(null)}>
+              <Button type="button" variant="secondary" onClick={() => setModal(null)}>
                 Hủy
-              </button>
-              <button
-                type="submit"
-                className="primary-button"
-                disabled={isSaving || !employees.length}
-              >
+              </Button>
+              <Button type="submit" disabled={isSaving || !employees.length} loading={isSaving}>
                 {isSaving ? 'Đang lưu...' : 'Lưu công việc'}
-              </button>
+              </Button>
             </div>
           </form>
         </Modal>
@@ -614,13 +730,9 @@ function SelectFilter({ label, value, onChange, children }) {
   return (
     <label className="text-sm font-medium text-slate-700">
       {label}
-      <select
-        className="form-input mt-1"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
+      <Select className="mt-1" value={value} onChange={(event) => onChange(event.target.value)}>
         {children}
-      </select>
+      </Select>
     </label>
   )
 }
@@ -629,28 +741,29 @@ function SelectField({ label, value, onChange, required = false, children }) {
   return (
     <label className="block text-sm font-medium text-slate-700">
       {label}
-      <select
-        className="form-input mt-1"
+      <Select
+        className="mt-1"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         required={required}
       >
         {children}
-      </select>
+      </Select>
     </label>
   )
 }
 
-function FormField({ label, value, onChange, required = false, type = 'text' }) {
+function FormField({ label, value, onChange, required = false, type = 'text', placeholder }) {
   return (
     <label className="block text-sm font-medium text-slate-700">
       {label}
-      <input
-        className="form-input mt-1"
+      <Input
+        className="mt-1"
         type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         required={required}
+        placeholder={placeholder}
       />
     </label>
   )

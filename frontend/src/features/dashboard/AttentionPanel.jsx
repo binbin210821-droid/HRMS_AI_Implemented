@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 
-import { FadeIn } from '../../components/animations/index.js'
+import { FadeIn, StaggerList } from '../../components/animations/index.js'
 
 const CATEGORY_LABELS = {
   early_warning: 'Dấu hiệu sớm',
@@ -99,11 +99,11 @@ function AttentionPanel({ summary, role, error, isLoading = false, variant = 'pa
           Hiện không có việc nào cần theo dõi.
         </p>
       ) : isLeadershipPopover ? (
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <StaggerList className="mt-4 grid gap-3 sm:grid-cols-2">
           {departmentGroups.map((group) => (
             <article
               key={group.id}
-              className="rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-brand-300"
+              className="rounded-xl border border-slate-200 bg-white p-4 text-left transition duration-motion-standard ease-motion-standard hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-brand-300"
             >
               <div className="flex items-start justify-between gap-3">
                 <span className="text-sm font-bold text-slate-800">{group.name}</span>
@@ -111,7 +111,7 @@ function AttentionPanel({ summary, role, error, isLoading = false, variant = 'pa
                   {group.totalCount} hạng mục
                 </span>
               </div>
-              <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] font-semibold">
+              <div className="mt-3 grid grid-cols-3 gap-2 text-xs font-semibold">
                 <span className="rounded-lg bg-amber-50 px-2 py-2 text-amber-800">
                   Sớm: {group.earlyWarningCount}
                 </span>
@@ -123,7 +123,7 @@ function AttentionPanel({ summary, role, error, isLoading = false, variant = 'pa
                 </span>
               </div>
               <div className="mt-3 border-t border-slate-100 pt-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                   Chi tiết theo nhân viên
                 </p>
                 <div className="mt-2 space-y-2">
@@ -159,14 +159,14 @@ function AttentionPanel({ summary, role, error, isLoading = false, variant = 'pa
               )}
             </article>
           ))}
-        </div>
+        </StaggerList>
       ) : (
-        <div className={`${isPopover ? 'mt-4' : 'mt-5'} grid gap-3 lg:grid-cols-2`}>
+        <StaggerList className={`${isPopover ? 'mt-4' : 'mt-5'} grid gap-3 lg:grid-cols-2`}>
           {items.map((item) => (
             <button
               key={`${item.source}-${item.id}`}
               type="button"
-              className={`rounded-xl border p-4 text-left transition hover:-translate-y-0.5 hover:shadow-md ${CATEGORY_STYLES[item.category] || 'border-slate-200 bg-white text-slate-800'}`}
+              className={`rounded-xl border p-4 text-left transition duration-motion-standard ease-motion-standard hover:-translate-y-0.5 hover:shadow-md ${CATEGORY_STYLES[item.category] || 'border-slate-200 bg-white text-slate-800'}`}
               onClick={() => openItem(item)}
               aria-label={`Xem và xử lý ${item.title}`}
             >
@@ -186,7 +186,7 @@ function AttentionPanel({ summary, role, error, isLoading = false, variant = 'pa
               <p className="mt-3 text-xs font-semibold">Xem và xử lý →</p>
             </button>
           ))}
-        </div>
+        </StaggerList>
       )}
     </FadeIn>
   )

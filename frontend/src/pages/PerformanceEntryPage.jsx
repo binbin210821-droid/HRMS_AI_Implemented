@@ -1,9 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { FadeIn } from '../components/animations/index.js'
+import { AnimatedTableRows, FadeIn } from '../components/animations/index.js'
+import { useActionFeedback } from '../components/feedback/index.js'
 import AttachmentLink from '../components/attachments/AttachmentLink.jsx'
-import Modal from '../components/Modal.jsx'
 import MainLayout from '../components/layout/MainLayout.jsx'
+import {
+  Button,
+  Dialog,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Textarea,
+} from '../components/ui/index.js'
 import { listEmployees } from '../features/employees/employeesApi.js'
 import {
   calculatePerformanceScore,
@@ -16,7 +29,8 @@ import {
   saveDailyPerformanceReview,
   updateDailyPerformanceReview,
 } from '../features/performance/performanceApi.js'
-import { useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { generateIdempotencyKey } from '../utils/idempotency.js'
 
 const today = businessToday()
 const PRIORITY_WEIGHTS = { low: 1, medium: 1.25, high: 1.5 }
@@ -35,6 +49,7 @@ function businessToday() {
 }
 
 function PerformanceEntryPage() {
+  const { confirmAction, notifyActionSuccess, notifyActionError } = useActionFeedback()
   const [employees, setEmployees] = useState([])
   const [metrics, setMetrics] = useState([])
   const [review, setReview] = useState(null)
@@ -48,6 +63,7 @@ function PerformanceEntryPage() {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
   const reviewRequestIdRef = useRef(0)
   const metricsRequestIdRef = useRef(0)
+  const idempotencyKeyRef = useRef(null)
 
   useEffect(() => {
     async function loadEmployees() {
@@ -139,11 +155,17 @@ function PerformanceEntryPage() {
     review.summary.reviewed_task_count === review.tasks.length,
   )
 
-  useRealtimeUpdates('tasks', loadReview)
-  useRealtimeUpdates('task_execution_reports', loadReview)
-  useRealtimeUpdates('performance_metrics', () => {
-    loadMetrics(form.employee_id, false)
+  useRealtimeUpdates('tasks', loadReview, { coalesceDelay: REALTIME_COALESCE_DELAY })
+  useRealtimeUpdates('task_execution_reports', loadReview, {
+    coalesceDelay: REALTIME_COALESCE_DELAY,
   })
+  useRealtimeUpdates(
+    'performance_metrics',
+    () => {
+      loadMetrics(form.employee_id, false)
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
 
   const preview = useMemo(() => {
     const tasks = review?.tasks || []
@@ -172,6 +194,7 @@ function PerformanceEntryPage() {
 
   function updateForm(event) {
     const { name, value } = event.target
+    if (name === 'employee_id' || name === 'date') idempotencyKeyRef.current = null
     setForm((current) => ({ ...current, [name]: value }))
     setReview(null)
     setTaskReviews({})
@@ -197,6 +220,7 @@ function PerformanceEntryPage() {
   function openReviewEdit(reviewDate) {
     setError('')
     setSuccess('')
+    idempotencyKeyRef.current = null
     if (form.date !== reviewDate) {
       setReview(null)
       setTaskReviews({})
@@ -238,8 +262,26 @@ function PerformanceEntryPage() {
       )
       return
     }
+    const employee = employees.find((item) => item.id === form.employee_id)
+    const confirmed = await confirmAction({
+      title: isChangingReview
+        ? 'Xác nhận thay đổi điểm nghiệm thu'
+        : 'Xác nhận ghi nhận nghiệm thu',
+      description: isChangingReview
+        ? 'Điểm nghiệm thu sẽ được cập nhật theo các giá trị bạn đã chỉnh sửa.'
+        : 'Kết quả nghiệm thu sẽ được ghi nhận cho nhân viên trong ngày đã chọn.',
+      details: [
+        `Nhân viên: ${employee?.full_name || 'Chưa xác định'}`,
+        `Ngày nghiệm thu: ${review.date || form.date}`,
+        `Số công việc: ${review.tasks.length}`,
+        `Điểm hiệu suất dự kiến: ${preview.performance == null ? 'Chưa đủ dữ liệu' : preview.performance.toFixed(1)}`,
+      ],
+      confirmLabel: isChangingReview ? 'Xác nhận thay đổi' : 'Xác nhận nghiệm thu',
+    })
+    if (!confirmed) return
     setError('')
     setSuccess('')
+    idempotencyKeyRef.current ??= generateIdempotencyKey()
     setIsSaving(true)
     const employeeId = form.employee_id
     const reviewDate = form.date
@@ -260,8 +302,8 @@ function PerformanceEntryPage() {
         }),
       }
       const saved = isChangingReview
-        ? await updateDailyPerformanceReview(payload)
-        : await saveDailyPerformanceReview(payload)
+        ? await updateDailyPerformanceReview(payload, idempotencyKeyRef.current)
+        : await saveDailyPerformanceReview(payload, idempotencyKeyRef.current)
 
       // API mutation đã trả về dữ liệu mới, nhưng vẫn tải lại theo đúng nhân viên/ngày
       // trước khi đóng modal để UI luôn phản ánh dữ liệu MongoDB cuối cùng.
@@ -292,6 +334,7 @@ function PerformanceEntryPage() {
           ]),
         ),
       )
+      idempotencyKeyRef.current = null
       setIsEditModalOpen(false)
       await loadMetrics(employeeId, false)
       setSuccess(
@@ -299,8 +342,17 @@ function PerformanceEntryPage() {
           ? `Đã thay đổi điểm nghiệm thu của ${saved.employee.full_name} ngày ${saved.date}.`
           : `Đã nghiệm thu công việc của ${saved.employee.full_name} ngày ${saved.date}.`,
       )
+      notifyActionSuccess({
+        title: isChangingReview ? 'Đã thay đổi điểm nghiệm thu' : 'Đã ghi nhận nghiệm thu',
+        message: isChangingReview
+          ? `Điểm nghiệm thu của ${saved.employee.full_name} ngày ${saved.date} đã được cập nhật.`
+          : `Kết quả nghiệm thu của ${saved.employee.full_name} ngày ${saved.date} đã được lưu.`,
+        details: [`Điểm hiệu suất: ${saved.performance_score ?? preview.performance ?? 'Chưa có'}`],
+      })
     } catch (requestError) {
-      setError(requestError.message || 'Không thể lưu nghiệm thu ngày.')
+      const message = requestError.message || 'Không thể lưu nghiệm thu ngày.'
+      setError(message)
+      notifyActionError({ title: 'Chưa lưu nghiệm thu', message })
     } finally {
       setIsSaving(false)
     }
@@ -309,7 +361,7 @@ function PerformanceEntryPage() {
   return (
     <MainLayout>
       <FadeIn className="mx-auto max-w-7xl">
-        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <p className="!text-caption !font-semibold !uppercase !tracking-wider !text-brand-600">
             Hiệu suất hàng ngày
           </p>
@@ -329,8 +381,8 @@ function PerformanceEntryPage() {
             <div className="grid gap-5 sm:grid-cols-2">
               <label className="block text-sm font-medium text-slate-700">
                 Nhân viên
-                <select
-                  className="form-input mt-1"
+                <Select
+                  className="mt-1"
                   name="employee_id"
                   value={form.employee_id}
                   onChange={updateForm}
@@ -343,12 +395,12 @@ function PerformanceEntryPage() {
                       {employee.full_name} — {employee.position}
                     </option>
                   ))}
-                </select>
+                </Select>
               </label>
               <label className="block text-sm font-medium text-slate-700">
                 Ngày đánh giá
-                <input
-                  className="form-input mt-1"
+                <Input
+                  className="mt-1"
                   type="date"
                   name="date"
                   value={form.date}
@@ -383,93 +435,98 @@ function PerformanceEntryPage() {
 
             {!isReviewComplete && review?.tasks.length > 0 && (
               <div className="mt-6 grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
-                <button
+                <Button
                   type="submit"
-                  className="primary-button inline-flex min-h-11 w-full max-w-[260px] items-center justify-center self-start px-5 text-base"
+                  className="min-h-11 w-full max-w-[260px] self-start px-5 text-base"
+                  loading={isSaving}
                   disabled={isSaving || isLoading || isReviewLoading || !review?.tasks.length}
                 >
-                  {isSaving ? 'Đang lưu…' : 'Nghiệm thu và lưu điểm ngày'}
-                </button>
+                  Nghiệm thu và lưu điểm ngày
+                </Button>
                 <ReviewSummary preview={preview} taskCount={review.tasks.length} />
               </div>
             )}
           </form>
         </section>
 
-        <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="mt-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <h2 className="text-slate-900">Lịch sử gần đây</h2>
           <p className="mt-2 text-sm text-ink-600">Các lần nghiệm thu của nhân viên đang chọn.</p>
           <div className="mt-5 overflow-x-auto">
-            <table className="w-full min-w-[820px] text-left text-sm">
-              <thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
-                <tr>
-                  <th className="px-4 py-3">Ngày</th>
-                  <th className="px-4 py-3">Đã chấm</th>
-                  <th className="px-4 py-3">Minh chứng</th>
-                  <th className="px-4 py-3">Chất lượng</th>
-                  <th className="px-4 py-3">Điểm hiệu suất</th>
-                  <th className="px-4 py-3">Ghi chú</th>
-                  <th className="px-4 py-3">Xem lại</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {metrics.slice(0, 10).map((metric) => (
-                  <tr key={metric.id}>
-                    <td className="px-4 py-3">{metric.date}</td>
-                    <td className="px-4 py-3">
-                      {metric.reviewed_task_count || 0}/{metric.total_review_task_count || 0}
-                    </td>
-                    <td className="px-4 py-3">
-                      {metric.evidence_task_count || 0}/{metric.total_review_task_count || 0}
-                    </td>
-                    <td className="px-4 py-3">{metric.quality_score}</td>
-                    <td className="px-4 py-3 font-semibold text-brand-700">
-                      {Number(metric.performance_score).toFixed(1)}
-                    </td>
-                    <td className="px-4 py-3 text-slate-600">
-                      {metric.note || 'Dữ liệu đánh giá cũ'}
-                    </td>
-                    <td className="px-4 py-3">
-                      {metric.total_review_task_count > 0 ? (
-                        <button
-                          type="button"
-                          className="font-medium text-brand-700 underline"
-                          onClick={() => openReviewEdit(metric.date)}
-                        >
-                          Thay đổi điểm
-                        </button>
-                      ) : (
-                        <span
-                          className="text-slate-400"
-                          title="Bản ghi cũ chưa có dữ liệu đánh giá theo từng công việc"
-                        >
-                          Không có chi tiết công việc
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+            <Table className="min-w-[820px]">
+              <TableHeader>
+                <TableRow className="border-b border-slate-200">
+                  <TableHead>Ngày</TableHead>
+                  <TableHead>Đã chấm</TableHead>
+                  <TableHead>Minh chứng</TableHead>
+                  <TableHead>Chất lượng</TableHead>
+                  <TableHead>Điểm hiệu suất</TableHead>
+                  <TableHead>Ghi chú</TableHead>
+                  <TableHead>Xem lại</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                <AnimatedTableRows>
+                  {metrics.slice(0, 10).map((metric) => (
+                    <TableRow key={metric.id}>
+                      <TableCell>{metric.date}</TableCell>
+                      <TableCell>
+                        {metric.reviewed_task_count || 0}/{metric.total_review_task_count || 0}
+                      </TableCell>
+                      <TableCell>
+                        {metric.evidence_task_count || 0}/{metric.total_review_task_count || 0}
+                      </TableCell>
+                      <TableCell>{metric.quality_score}</TableCell>
+                      <TableCell className="font-semibold text-brand-700">
+                        {Number(metric.performance_score).toFixed(1)}
+                      </TableCell>
+                      <TableCell className="text-slate-600">
+                        {metric.note || 'Chưa có ghi chú'}
+                      </TableCell>
+                      <TableCell>
+                        {metric.total_review_task_count > 0 ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="px-0 font-medium text-brand-700 underline shadow-none hover:bg-transparent hover:text-brand-800"
+                            onClick={() => openReviewEdit(metric.date)}
+                          >
+                            Thay đổi điểm
+                          </Button>
+                        ) : (
+                          <span
+                            className="text-slate-400"
+                            title="Bản ghi cũ chưa có dữ liệu đánh giá theo từng công việc"
+                          >
+                            Không có chi tiết công việc
+                          </span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </AnimatedTableRows>
                 {!metrics.length && (
-                  <tr>
-                    <td colSpan="7" className="px-4 py-8 text-center text-slate-500">
+                  <TableRow>
+                    <TableCell colSpan="7" className="py-8 text-center text-slate-500">
                       Chưa có dữ liệu hiệu suất.
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 )}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
         </section>
       </FadeIn>
 
       {isEditModalOpen && (
-        <Modal
+        <Dialog
           title={
             review?.employee?.full_name
               ? `Thay đổi điểm nghiệm thu · ${review.employee.full_name}`
               : 'Đang tải dữ liệu đánh giá'
           }
-          description={`Chỉnh sửa đánh giá công việc ngày ${review?.date || form.date}. Hệ thống chỉ lưu một kết quả nghiệm thu cho mỗi nhân viên trong ngày.`}
+          description={`Chỉnh sửa đánh giá công việc ngày ${review?.date || form.date}.`}
           className="max-w-5xl"
           onClose={() => !isSaving && setIsEditModalOpen(false)}
         >
@@ -481,13 +538,9 @@ function PerformanceEntryPage() {
           {!isReviewLoading && error && (
             <div className="space-y-4">
               <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setIsEditModalOpen(false)}
-              >
+              <Button type="button" variant="secondary" onClick={() => setIsEditModalOpen(false)}>
                 Đóng
-              </button>
+              </Button>
             </div>
           )}
           {!isReviewLoading && !error && !review && (
@@ -495,13 +548,9 @@ function PerformanceEntryPage() {
               <p className="rounded-xl bg-slate-50 p-5 text-sm text-slate-600">
                 Chưa có dữ liệu đánh giá cho ngày này.
               </p>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => setIsEditModalOpen(false)}
-              >
+              <Button type="button" variant="secondary" onClick={() => setIsEditModalOpen(false)}>
                 Đóng
-              </button>
+              </Button>
             </div>
           )}
           {!isReviewLoading && review && (
@@ -517,27 +566,28 @@ function PerformanceEntryPage() {
               />
               <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
                 <div className="flex items-end justify-end gap-3">
-                  <button
+                  <Button
                     type="button"
-                    className="secondary-button"
+                    variant="secondary"
                     onClick={() => setIsEditModalOpen(false)}
                     disabled={isSaving}
                   >
                     Hủy
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="submit"
-                    className="primary-button inline-flex min-h-11 min-w-48 items-center justify-center self-start px-6 text-base"
+                    className="min-h-11 min-w-48 self-start px-6 text-base"
+                    loading={isSaving}
                     disabled={isSaving}
                   >
-                    {isSaving ? 'Đang lưu…' : 'Lưu thay đổi điểm'}
-                  </button>
+                    Lưu thay đổi điểm
+                  </Button>
                 </div>
                 <ReviewSummary preview={preview} taskCount={review.tasks.length} />
               </div>
             </form>
           )}
-        </Modal>
+        </Dialog>
       )}
     </MainLayout>
   )
@@ -624,8 +674,8 @@ function ReviewTaskFields({
                 {!hasEvidence && (
                   <label className="block font-medium text-slate-700">
                     Lý do thiếu minh chứng <span className="text-red-600">*</span>
-                    <textarea
-                      className="form-input mt-1 min-h-20 bg-white font-normal"
+                    <Textarea
+                      className="mt-1 min-h-20 bg-white font-normal"
                       value={item.missing_reason || ''}
                       onChange={(event) => onChange(task.id, 'missing_reason', event.target.value)}
                       placeholder="Nêu rõ lý do chưa có tệp minh chứng"
@@ -641,8 +691,8 @@ function ReviewTaskFields({
                       (Điểm hiện tại: {task.score ?? '—'})
                     </span>
                   )}
-                  <input
-                    className="form-input mt-1"
+                  <Input
+                    className="mt-1"
                     type="number"
                     min="0"
                     max="100"
@@ -656,8 +706,8 @@ function ReviewTaskFields({
                   <label className="block text-sm font-medium text-slate-700">
                     Lý do thay đổi điểm
                     {scoreChanged && <span className="text-red-600"> *</span>}
-                    <textarea
-                      className="form-input mt-1 min-h-20 font-normal"
+                    <Textarea
+                      className="mt-1 min-h-20 font-normal"
                       value={item.change_reason || ''}
                       onChange={(event) => onChange(task.id, 'change_reason', event.target.value)}
                       placeholder="Nêu rõ căn cứ thay đổi điểm cho công việc này"
@@ -670,8 +720,8 @@ function ReviewTaskFields({
                 )}
                 <label className="block text-sm font-medium text-slate-700">
                   Nhận xét
-                  <textarea
-                    className="form-input mt-1 min-h-20 font-normal"
+                  <Textarea
+                    className="mt-1 min-h-20 font-normal"
                     value={item.note || ''}
                     onChange={(event) => onChange(task.id, 'note', event.target.value)}
                     placeholder="Nhận xét ngắn về kết quả"
@@ -729,9 +779,9 @@ function CompletedReviewSummary({ review, onEdit }) {
             một kết quả duy nhất cho ngày {review.date}.
           </p>
         </div>
-        <button type="button" className="secondary-button" onClick={onEdit}>
+        <Button type="button" variant="secondary" onClick={onEdit}>
           Thay đổi điểm
-        </button>
+        </Button>
       </div>
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
         <MetricPill label="Điểm chất lượng" value={`${review.summary.quality_score ?? '—'}/100`} />

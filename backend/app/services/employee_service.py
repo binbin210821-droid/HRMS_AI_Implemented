@@ -2,6 +2,7 @@ from bson import ObjectId
 from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
+from app.core.pagination import Page
 from app.core.time import BusinessClock
 from app.models.employee import EmployeeCreate, EmployeeDocument, EmployeeResponse, EmployeeUpdate
 from app.repositories.employee_repository import EmployeeRepository
@@ -22,6 +23,7 @@ class EmployeeService:
             email=document.email,
             phone=document.phone,
             position=document.position,
+            skills=document.skills,
             department_id=str(document.department_id),
             is_active=document.is_active,
             created_at=document.created_at,
@@ -43,6 +45,38 @@ class EmployeeService:
         )
         documents = await self.repository.find_many(scope, requested_department)
         return [self._response(document) for document in documents]
+
+    async def list_page(
+        self,
+        scope: ObjectId | None,
+        department_id: str | None,
+        offset: int,
+        limit: int,
+    ) -> Page[EmployeeResponse]:
+        requested_department = (
+            parse_object_id(department_id, "Mã phòng ban") if department_id else None
+        )
+        page = await self.repository.find_many_page(
+            scope, requested_department, offset, limit
+        )
+        return Page(items=[self._response(document) for document in page.items], total=page.total)
+
+    async def list_page_v1(
+        self,
+        scope: ObjectId | None,
+        department_id: str | None,
+        is_active: bool | None,
+        sort_stage: dict[str, int],
+        page: int,
+        page_size: int,
+    ) -> Page[EmployeeResponse]:
+        requested_department = (
+            parse_object_id(department_id, "Mã phòng ban") if department_id else None
+        )
+        result = await self.repository.find_many_page_v1(
+            scope, requested_department, is_active, sort_stage, page, page_size
+        )
+        return Page(items=[self._response(document) for document in result.items], total=result.total)
 
     async def get(self, employee_id: str, scope: ObjectId | None) -> EmployeeResponse:
         object_id = parse_object_id(employee_id, "Mã nhân viên")
@@ -68,6 +102,9 @@ class EmployeeService:
             "email": request.email.strip() if request.email else None,
             "phone": request.phone.strip() if request.phone else None,
             "position": request.position.strip(),
+            "skills": list(
+                dict.fromkeys(item.strip().casefold() for item in request.skills if item.strip())
+            ),
             "department_id": department_id,
             "is_active": request.is_active,
             "created_at": now,
@@ -105,6 +142,14 @@ class EmployeeService:
         for field in ("employee_code", "full_name", "email", "phone", "position"):
             if field in values and isinstance(values[field], str):
                 values[field] = values[field].strip()
+        if "skills" in values:
+            values["skills"] = list(
+                dict.fromkeys(
+                    item.strip().casefold()
+                    for item in values["skills"]
+                    if item and item.strip()
+                )
+            )
         if "employee_code" in values:
             values["employee_code"] = values["employee_code"].upper()
         values["updated_at"] = self._clock.now()

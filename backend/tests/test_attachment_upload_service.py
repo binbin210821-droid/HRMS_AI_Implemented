@@ -71,13 +71,14 @@ class FakeRepository:
         self.documents[session_id] = UploadSessionDocument.model_validate(values)
         return self.documents[session_id]
 
-    async def mark_committed(self, session_ids, now):
+    async def mark_committed(self, session_ids, owner_id, now):
         for session_id in session_ids:
-            await self.update_status(session_id, "committed", now)
+            if self.documents[session_id].owner_id == owner_id:
+                await self.update_status(session_id, "committed", now)
 
-    async def mark_failed(self, session_ids, now):
+    async def mark_failed(self, session_ids, owner_id, now):
         for session_id in session_ids:
-            if session_id in self.documents:
+            if session_id in self.documents and self.documents[session_id].owner_id == owner_id:
                 await self.update_status(session_id, "failed", now)
 
     async def find_for_owner(self, session_ids, owner_id):
@@ -215,9 +216,32 @@ async def test_direct_upload_commit_marks_uploaded_session_committed():
     created = await service.create(department_request(department_id), manager(department_id), department_id)
 
     await repository.update_status(created.id, "uploaded", datetime.now(timezone.utc))
-    await service.commit([created.id])
+    await service.commit([created.id], manager(department_id).user_id)
 
     assert repository.documents[created.id].status == "committed"
+
+
+@pytest.mark.asyncio
+async def test_direct_upload_commit_does_not_change_another_owners_session():
+    repository = FakeRepository()
+    service = AttachmentUploadService(repository, FakeStorage(), settings())
+    department_id = ObjectId()
+    owner = manager(department_id)
+    other_owner = CurrentUser(
+        user_id="manager-2",
+        username="other-manager",
+        full_name="Quản lý khác",
+        role=UserRole.MANAGER,
+        department_id=str(department_id),
+    )
+    created = await service.create(department_request(department_id), owner, department_id)
+    repository.documents[created.id] = repository.documents[created.id].model_copy(
+        update={"owner_id": other_owner.user_id, "status": "uploaded"}
+    )
+
+    await service.commit([created.id], owner.user_id)
+
+    assert repository.documents[created.id].status == "uploaded"
 
 
 @pytest.mark.asyncio

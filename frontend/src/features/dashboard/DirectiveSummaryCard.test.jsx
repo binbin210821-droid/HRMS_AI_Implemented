@@ -12,6 +12,7 @@ vi.mock('react-router-dom', () => ({
 }))
 
 vi.mock('../../hooks/useRealtimeUpdates.js', () => ({
+  REALTIME_COALESCE_DELAY: 250,
   useRealtimeUpdates: vi.fn(),
 }))
 

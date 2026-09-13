@@ -1,49 +1,70 @@
 import { create } from 'zustand'
 
-const TOKEN_KEY = 'hrms_auth_token'
+import { getCurrentUser, logout as requestLogout } from '../features/auth/authApi.js'
+import { rotateRequestSession } from '../services/requestCoordinator.js'
 
-function readToken() {
-  if (typeof localStorage === 'undefined') return null
-  return localStorage.getItem(TOKEN_KEY)
-}
+let initializationPromise = null
 
-function decodeToken(token) {
-  if (!token) return null
-
-  try {
-    const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
-    return JSON.parse(atob(payload))
-  } catch {
-    return null
+function userState(user, isInitializing = false) {
+  return {
+    currentUser: user,
+    // Giữ alias nội bộ để các màn hình hiện tại không bị ảnh hưởng.
+    claims: user,
+    role: user?.role || null,
+    isAuthenticated: Boolean(user),
+    isInitializing,
   }
 }
 
-function getSession(token) {
-  const claims = decodeToken(token)
-  if (!claims?.sub || !claims?.role) return { token: null, role: null, claims: null }
-  if (claims.exp && claims.exp * 1000 <= Date.now())
-    return { token: null, role: null, claims: null }
-  return { token, role: claims.role, claims }
+function clearState(isInitializing = false) {
+  return {
+    currentUser: null,
+    claims: null,
+    role: null,
+    isAuthenticated: false,
+    isInitializing,
+  }
 }
 
-const initialSession = getSession(readToken())
-
 export const useAuthStore = create((set) => ({
-  token: initialSession.token,
-  role: initialSession.role,
-  claims: initialSession.claims,
-  isAuthenticated: Boolean(initialSession.token),
-  login: (authResponse) => {
-    const session = getSession(authResponse.access_token)
-    if (typeof localStorage !== 'undefined' && session.token) {
-      localStorage.setItem(TOKEN_KEY, session.token)
-    }
-    set({ ...session, isAuthenticated: Boolean(session.token) })
+  ...clearState(true),
+  setUser: (user) => {
+    rotateRequestSession()
+    set(userState(user))
+  },
+  // Alias tương thích nội bộ; dữ liệu đầu vào phải là CurrentUser từ backend.
+  login: (user) => {
+    rotateRequestSession()
+    set(userState(user))
+  },
+  initializeSession: async () => {
+    if (initializationPromise) return initializationPromise
+
+    set({ isInitializing: true })
+    initializationPromise = getCurrentUser()
+      .then((user) => {
+        rotateRequestSession()
+        set(userState(user))
+        return user
+      })
+      .catch(() => {
+        rotateRequestSession()
+        set(clearState())
+        return null
+      })
+      .finally(() => {
+        initializationPromise = null
+      })
+    return initializationPromise
+  },
+  clearSession: () => {
+    rotateRequestSession()
+    set(clearState())
   },
   logout: () => {
-    if (typeof localStorage !== 'undefined') localStorage.removeItem(TOKEN_KEY)
-    set({ token: null, role: null, claims: null, isAuthenticated: false })
+    const request = requestLogout().catch(() => undefined)
+    rotateRequestSession()
+    set(clearState())
+    return request
   },
 }))
-
-export { TOKEN_KEY }

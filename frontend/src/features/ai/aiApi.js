@@ -1,3 +1,5 @@
+import { csrfHeaders } from '../../services/csrf.js'
+import httpClient from '../../services/httpClient.js'
 import { useAuthStore } from '../../stores/authStore.js'
 
 function parseSseBlock(block) {
@@ -11,20 +13,51 @@ function parseSseBlock(block) {
   }
 }
 
-export async function streamAiChat(message, { onToken, onComplete, signal } = {}) {
-  const token = useAuthStore.getState().token
-  const response = await fetch('/api/ai/chat/stream', {
+export async function streamAiChat(
+  message,
+  {
+    onToken,
+    onStatus,
+    onConversation,
+    onComplete,
+    signal,
+    mode = 'chat',
+    forceRefresh = false,
+    conversationId,
+  } = {},
+) {
+  const response = await fetch('/api/v1/ai/chat/stream', {
     method: 'POST',
     headers: {
       Accept: 'text/event-stream',
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...csrfHeaders('POST'),
     },
-    body: JSON.stringify({ message }),
+    credentials: 'include',
+    body: JSON.stringify(
+      mode === 'summary'
+        ? { message, mode, refresh: forceRefresh }
+        : { message, ...(conversationId ? { conversation_id: conversationId } : {}) },
+    ),
     signal,
   })
 
-  if (!response.ok) throw new Error('Không thể kết nối với Trợ lý AI')
+  if (response.status === 401) useAuthStore.getState().clearSession()
+
+  if (!response.ok) {
+    let payload = null
+    try {
+      payload = await response.json()
+    } catch {
+      // Giữ thông báo an toàn khi provider/proxy không trả JSON.
+    }
+    const error = new Error(payload?.message || 'Không thể kết nối với Trợ lý AI')
+    error.status = response.status
+    error.code = payload?.code
+    error.details = payload?.details
+    error.requestId = payload?.request_id || response.headers.get('X-Request-ID') || undefined
+    throw error
+  }
   if (!response.body) throw new Error('Trợ lý AI chưa thể mở luồng trả lời')
 
   const reader = response.body.getReader()
@@ -41,6 +74,10 @@ export async function streamAiChat(message, { onToken, onComplete, signal } = {}
     blocks.forEach((block) => {
       const payload = parseSseBlock(block)
       if (payload?.type === 'token' && payload.content) onToken?.(payload.content)
+      if (payload?.type === 'status' && payload.content) onStatus?.(payload.content)
+      if (payload?.type === 'conversation' && payload.conversation_id) {
+        onConversation?.(payload.conversation_id)
+      }
       if (payload?.type === 'error') throw new Error(payload.content)
       if (payload?.type === 'done') onComplete?.()
     })
@@ -59,4 +96,26 @@ export async function streamAiChat(message, { onToken, onComplete, signal } = {}
   } finally {
     reader.releaseLock()
   }
+}
+
+export function streamAiSummary(message, options = {}) {
+  return streamAiChat(message, { ...options, mode: 'summary' })
+}
+
+export function getAlertActionProposal(alertId) {
+  return httpClient(`/api/v1/alerts/${encodeURIComponent(alertId)}/ai-proposal`, {
+    method: 'POST',
+  })
+}
+
+export function getOverdueTaskActionProposal(taskId) {
+  return httpClient(`/api/v1/tasks/${encodeURIComponent(taskId)}/ai-proposal`, {
+    method: 'POST',
+  })
+}
+
+export function getLeadershipActionProposal() {
+  return httpClient('/api/v1/ai/leadership-proposal', {
+    method: 'POST',
+  })
 }

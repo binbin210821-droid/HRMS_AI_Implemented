@@ -73,7 +73,7 @@ function CalendarView({ tasks, onTaskClick, onEmptyDayClick, onTaskDrop }) {
             <button
               key={value}
               type="button"
-              className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition ${view === value ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+              className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition duration-motion-micro ease-motion-standard ${view === value ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
               onClick={() => setView(value)}
             >
               {label}

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { FadeIn } from '../../components/animations/index.js'
-import { useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { FadeIn, StaggerList } from '../../components/animations/index.js'
+import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
 import { listCoordinationSuggestions } from '../coordination/coordinationApi.js'
 import { DIRECTIVE_SOURCE_LABELS } from '../coordination/directiveLabels.js'
 
@@ -34,9 +34,13 @@ function CoordinationSuggestionsCard({ role }) {
     void loadSuggestions()
   }, [loadSuggestions])
 
-  useRealtimeUpdates('alerts', () => {
-    void loadSuggestions()
-  })
+  useRealtimeUpdates(
+    'alerts',
+    () => {
+      void loadSuggestions()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
 
   const pendingSuggestions = useMemo(
     () =>
@@ -50,7 +54,7 @@ function CoordinationSuggestionsCard({ role }) {
 
   return (
     <div className="mt-8">
-      <FadeIn className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+      <FadeIn className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-bold text-slate-900">Gợi ý điều phối cần xem xét</h2>
@@ -76,7 +80,7 @@ function CoordinationSuggestionsCard({ role }) {
             Không có gợi ý điều phối nào đang chờ.
           </p>
         ) : (
-          <div className="mt-5 grid gap-3 lg:grid-cols-2">
+          <StaggerList className="mt-5 grid gap-3 lg:grid-cols-2">
             {pendingSuggestions.map((suggestion) => {
               const candidate = suggestion.candidates[0]
               return (
@@ -108,7 +112,7 @@ function CoordinationSuggestionsCard({ role }) {
                 </article>
               )
             })}
-          </div>
+          </StaggerList>
         )}
       </FadeIn>
     </div>

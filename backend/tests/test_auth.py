@@ -2,11 +2,27 @@ from datetime import datetime, timezone
 
 import pytest
 from bson import ObjectId
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
+from fastapi.security import HTTPAuthorizationCredentials
+from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
-from app.api.dependencies import get_current_user, get_department_scope, require_role
+from app.api.dependencies import (
+    extract_request_token,
+    get_current_user,
+    get_department_scope,
+    require_role,
+)
 from app.core.config import Settings
-from app.core.security import create_access_token, decode_access_token, hash_password
+from app.core.csrf import CSRFMiddleware
+from app.core.security import (
+    create_access_token,
+    decode_access_token,
+    ensure_csrf_cookie,
+    hash_password,
+    set_auth_cookies,
+)
 from app.models.user import CurrentUser, LoginRequest, UserDocument, UserRole
 from app.services.auth_service import AuthenticationService
 
@@ -38,6 +54,27 @@ class FakeUserRepository:
 
     async def find_by_id(self, _: str) -> UserDocument | None:
         return self.user
+
+
+def make_request(*, cookie: str | None = None, authorization: str | None = None) -> Request:
+    headers = []
+    if cookie:
+        headers.append((b"cookie", cookie.encode()))
+    if authorization:
+        headers.append((b"authorization", authorization.encode()))
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/auth/me",
+            "raw_path": b"/api/auth/me",
+            "query_string": b"",
+            "headers": headers,
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -127,3 +164,88 @@ async def test_role_guard_and_department_scope() -> None:
     with pytest.raises(HTTPException) as forbidden:
         await leadership_guard(manager)
     assert forbidden.value.status_code == 403
+
+
+def test_cookie_is_the_primary_auth_source_and_bearer_remains_compatible() -> None:
+    settings = Settings(jwt_secret="test-secret")
+    request = make_request(
+        cookie=f"{settings.auth_access_cookie_name}=cookie-token",
+        authorization="Bearer cookie-token",
+    )
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="cookie-token")
+
+    assert extract_request_token(request, credentials) == "cookie-token"
+    assert request.state.auth_source == "cookie"
+
+    bearer_request = make_request(authorization="Bearer legacy-token")
+    bearer_credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="legacy-token")
+    assert extract_request_token(bearer_request, bearer_credentials) == "legacy-token"
+    assert bearer_request.state.auth_source == "bearer"
+
+
+def test_mismatched_cookie_and_bearer_are_rejected() -> None:
+    settings = Settings(jwt_secret="test-secret")
+    request = make_request(
+        cookie=f"{settings.auth_access_cookie_name}=cookie-token",
+        authorization="Bearer other-token",
+    )
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="other-token")
+
+    with pytest.raises(HTTPException) as error:
+        extract_request_token(request, credentials)
+    assert error.value.status_code == 401
+
+
+def test_auth_cookies_include_httponly_access_and_readable_csrf_cookie() -> None:
+    settings = Settings(jwt_secret="test-secret")
+    response = Response()
+
+    set_auth_cookies(response, "signed-token", settings, csrf_token="csrf-token")
+    cookies = response.headers.getlist("set-cookie")
+
+    access_cookie = next(cookie for cookie in cookies if settings.auth_access_cookie_name in cookie)
+    csrf_cookie = next(cookie for cookie in cookies if settings.auth_csrf_cookie_name in cookie)
+    assert "HttpOnly" in access_cookie
+    assert "HttpOnly" not in csrf_cookie
+    assert "signed-token" in access_cookie
+    assert "csrf-token" in csrf_cookie
+
+
+def test_ensure_csrf_cookie_does_not_replace_access_cookie() -> None:
+    settings = Settings(jwt_secret="test-secret")
+    response = Response()
+
+    ensure_csrf_cookie(response, settings, None)
+    cookies = response.headers.getlist("set-cookie")
+
+    assert len(cookies) == 1
+    assert settings.auth_csrf_cookie_name in cookies[0]
+
+
+@pytest.mark.asyncio
+async def test_csrf_middleware_requires_matching_token_for_cookie_mutations() -> None:
+    async def app(scope, receive, send):
+        await PlainTextResponse("ok")(scope, receive, send)
+
+    protected_app = CSRFMiddleware(app)
+    transport = ASGITransport(app=protected_app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        missing = await client.post(
+            "/api/tasks",
+            headers={"Cookie": "hrms_access_token=access; hrms_csrf_token=csrf"},
+        )
+        valid = await client.post(
+            "/api/tasks",
+            headers={
+                "Cookie": "hrms_access_token=access; hrms_csrf_token=csrf",
+                "X-CSRF-Token": "csrf",
+            },
+        )
+        safe = await client.get(
+            "/api/tasks",
+            headers={"Cookie": "hrms_access_token=access; hrms_csrf_token=csrf"},
+        )
+
+    assert missing.status_code == 403
+    assert valid.status_code == 200
+    assert safe.status_code == 200

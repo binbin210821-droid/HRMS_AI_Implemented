@@ -126,11 +126,11 @@ Rà soát FastAPI/MongoDB backend, React/Vite frontend, router composition, serv
 
 ### L2 — Endpoint/wrapper legacy còn tồn tại nhưng không có caller runtime
 
-**Mô tả.** Inventory xác định các path không được gọi từ frontend runtime: `/api/auth/me`, `/api/coordination/alerts/{alert_id}/directive-targets`, deprecated `/direct`, `/api/performance/daily`, `/api/overload/scan`, `/api/manager-evaluations`, toàn bộ threshold endpoints, cùng một số detail endpoint chưa có caller trực tiếp. Frontend wrapper không có external caller gồm `listDirectiveTargets`, `issueDirective`, `scanOverloadLogs`, `createDailyPerformance`.
+**Mô tả.** Inventory trước đây xác định các path không được gọi từ frontend runtime, trong đó flow điều phối cá nhân `/api/coordination/alerts/{alert_id}/directive-targets` và deprecated `/direct` đã được gỡ ở bản hiện tại. Các legacy surface còn lại gồm `/api/auth/me`, `/api/performance/daily`, `/api/overload/scan`, `/api/manager-evaluations`, toàn bộ threshold endpoints và một số detail endpoint chưa có caller trực tiếp.
 
-**Đánh giá.** Đây là code tồn đọng/compatibility surface, chưa phải lỗi route mismatch. Riêng `/api/coordination/alerts/{alert_id}/direct` đã được đánh dấu deprecated và service trả 409, nên nên được coi là migration surface chứ không phải chức năng hoạt động.
+**Đánh giá.** Flow điều phối cá nhân đã được xác nhận không có caller và đã bị xóa; `coordination_directives` chỉ còn phục vụ đọc dữ liệu lịch sử và tiếp nhận (`fulfill`) các chỉ thị đã tồn tại. Các legacy surface khác vẫn cần quản lý theo kế hoạch deprecate riêng.
 
-**Đề xuất hướng xử lý.** Lập danh sách legacy contract, quyết định deprecate/remove có versioning; không xóa chỉ dựa trên grep vì có thể có client ngoài frontend. Nếu giữ, bổ sung tài liệu caller/owner và test deprecated response.
+**Đề xuất hướng xử lý.** Với flow điều phối cá nhân, đã có quyết định remove và test OpenAPI xác nhận cả `/api` và `/api/v1` không còn route. Các surface legacy khác vẫn cần quyết định remove theo versioning nếu còn client ngoài frontend.
 
 ## Nhất quán RBAC và tương tác hai vai trò
 
@@ -248,4 +248,3 @@ Codebase có kiến trúc phân lớp và scope RBAC khá rõ; các luồng chí
 - Orphan `created_by` trong seed và thiếu `threshold_configs` index.
 - N+1, subscriber/event gap, lịch reconcile storage và thuật ngữ “chỉ thị”.
 - Không kết luận số lượng dữ liệu mồ côi, index thực tế trong Mongo, Change Stream live, signed URL/MinIO hoặc phân quyền runtime ngoài các unit/API tests đã chạy.
-

@@ -7,6 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import OperationFailure
 
 from app.core.mongo_types import normalize_mongo_value
+from app.core.pagination import Page
 from app.models.alert import AlertDocument
 from app.models.coordination import (
     CoordinationDirectiveDocument,
@@ -23,6 +24,7 @@ class CoordinationRepository:
     """Mongo queries dedicated to workload coordination and its audit trail."""
 
     def __init__(self, database: AsyncIOMotorDatabase) -> None:
+        self.client = database.client
         self.alerts = database["alerts"]
         self.metrics = database["performance_metrics"]
         self.employees = database["employees"]
@@ -36,7 +38,6 @@ class CoordinationRepository:
     async def ensure_indexes(self) -> None:
         await self.plans.create_index("alert_id", unique=True)
         await self.plans.create_index([("department_id", 1), ("created_at", -1)])
-        await self.directives.create_index("alert_id", unique=True)
         await self.directives.create_index([("target_department_id", 1), ("status", 1)])
         try:
             await self.department_directives.drop_index("target_department_id_1_status_1")
@@ -63,8 +64,27 @@ class CoordinationRepository:
         documents = await self.alerts.find(query).sort("created_at", -1).to_list(None)
         return [AlertDocument.model_validate(document) for document in documents]
 
-    async def find_alert(self, alert_id: ObjectId) -> AlertDocument | None:
-        document = await self.alerts.find_one({"_id": alert_id})
+    async def list_alerts_page(
+        self, department_id: ObjectId | None, offset: int, limit: int
+    ) -> Page[AlertDocument]:
+        query: dict[str, Any] = {}
+        if department_id is not None:
+            query["department_id"] = department_id
+        total = await self.alerts.count_documents(query)
+        documents = (
+            await self.alerts.find(query)
+            .sort("created_at", -1)
+            .skip(offset)
+            .limit(limit)
+            .to_list(None)
+        )
+        return Page(
+            items=[AlertDocument.model_validate(document) for document in documents],
+            total=total,
+        )
+
+    async def find_alert(self, alert_id: ObjectId, session: Any | None = None) -> AlertDocument | None:
+        document = await self.alerts.find_one({"_id": alert_id}, session=session)
         return AlertDocument.model_validate(document) if document else None
 
     async def list_alerts_by_department(
@@ -120,6 +140,65 @@ class CoordinationRepository:
             department_id, metric_date, excluded_employee_id
         )
 
+    async def find_rebalance_candidates_page(
+        self,
+        department_id: ObjectId,
+        metric_date: Date,
+        excluded_employee_id: ObjectId,
+        offset: int,
+        limit: int,
+    ) -> Page[WorkloadCandidateResponse]:
+        start = datetime.combine(metric_date, time.min, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        match: dict[str, Any] = {
+            "date": {"$gte": start, "$lt": end},
+            "tasks_completed": {"$lte": 2},
+            "quality_score": {"$gte": 80},
+            "employee_id": {"$ne": excluded_employee_id},
+        }
+        pipeline: list[dict[str, Any]] = [
+            {"$match": match},
+            {
+                "$lookup": {
+                    "from": "employees",
+                    "localField": "employee_id",
+                    "foreignField": "_id",
+                    "as": "employee",
+                }
+            },
+            {"$unwind": "$employee"},
+            {
+                "$match": {
+                    "employee.department_id": department_id,
+                    "employee.is_active": True,
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "employee_id": {"$toString": "$employee_id"},
+                    "employee_code": "$employee.employee_code",
+                    "employee_name": "$employee.full_name",
+                    "tasks_completed": 1,
+                    "quality_score": 1,
+                }
+            },
+            {"$sort": {"tasks_completed": 1, "quality_score": -1}},
+            {
+                "$facet": {
+                    "metadata": [{"$count": "total"}],
+                    "items": [{"$skip": offset}, {"$limit": limit}],
+                }
+            },
+        ]
+        result = await self.metrics.aggregate(pipeline).to_list(1)
+        payload = result[0] if result else {}
+        metadata = payload.get("metadata") or []
+        return Page(
+            items=[WorkloadCandidateResponse.model_validate(document) for document in payload.get("items") or []],
+            total=metadata[0]["total"] if metadata else 0,
+        )
+
     async def find_rebalance_candidates_for_group(
         self, department_id: ObjectId, metric_date: Date
     ) -> list[WorkloadCandidateResponse]:
@@ -173,55 +252,6 @@ class CoordinationRepository:
         documents = await self.metrics.aggregate(pipeline).to_list(None)
         return [WorkloadCandidateResponse.model_validate(document) for document in documents]
 
-    async def count_rebalance_capacity_by_department(
-        self, department_ids: list[ObjectId], metric_date: Date
-    ) -> dict[str, int]:
-        if not department_ids:
-            return {}
-        start = datetime.combine(metric_date, time.min, tzinfo=timezone.utc)
-        end = start + timedelta(days=1)
-        pipeline: list[dict[str, Any]] = [
-            {
-                "$match": {
-                    "date": {"$gte": start, "$lt": end},
-                    "tasks_completed": {"$lte": 2},
-                    "quality_score": {"$gte": 80},
-                }
-            },
-            {
-                "$lookup": {
-                    "from": "employees",
-                    "localField": "employee_id",
-                    "foreignField": "_id",
-                    "as": "employee",
-                }
-            },
-            {"$unwind": "$employee"},
-            {
-                "$match": {
-                    "employee.department_id": {"$in": department_ids},
-                    "employee.is_active": True,
-                }
-            },
-            {
-                "$group": {
-                    "_id": "$employee.department_id",
-                    "employee_ids": {"$addToSet": "$employee_id"},
-                }
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "available_employee_count": {"$size": "$employee_ids"},
-                }
-            },
-        ]
-        documents = await self.metrics.aggregate(pipeline).to_list(None)
-        return {
-            str(document["_id"]): int(document["available_employee_count"])
-            for document in documents
-        }
-
     async def find_plan(self, alert_id: ObjectId) -> CoordinationPlanDocument | None:
         document = await self.plans.find_one({"alert_id": alert_id})
         return CoordinationPlanDocument.model_validate(document) if document else None
@@ -235,15 +265,12 @@ class CoordinationRepository:
         plans = [CoordinationPlanDocument.model_validate(document) for document in documents]
         return {plan.alert_id: plan for plan in plans}
 
-    async def insert_plan(self, document: dict[str, Any]) -> CoordinationPlanDocument:
-        result = await self.plans.insert_one(normalize_mongo_value(document))
-        created = await self.plans.find_one({"_id": result.inserted_id})
+    async def insert_plan(
+        self, document: dict[str, Any], session: Any | None = None
+    ) -> CoordinationPlanDocument:
+        result = await self.plans.insert_one(normalize_mongo_value(document), session=session)
+        created = await self.plans.find_one({"_id": result.inserted_id}, session=session)
         return CoordinationPlanDocument.model_validate(created)
-
-    async def insert_directive(self, document: dict[str, Any]) -> CoordinationDirectiveDocument:
-        result = await self.directives.insert_one(normalize_mongo_value(document))
-        created = await self.directives.find_one({"_id": result.inserted_id})
-        return CoordinationDirectiveDocument.model_validate(created)
 
     async def insert_department_directive(
         self, document: dict[str, Any]
@@ -279,7 +306,7 @@ class CoordinationRepository:
             await self.department_directives.find(
                 {"target_department_id": department_id, "status": "pending"}
             )
-            .sort("issued_at", -1)
+            .sort([("issued_at", -1), ("_id", -1)])
             .to_list(None)
         )
         return [DepartmentAlertDirectiveDocument.model_validate(document) for document in documents]
@@ -292,8 +319,37 @@ class CoordinationRepository:
             query["target_department_id"] = target_department_id
         if status is not None:
             query["status"] = status
-        documents = await self.department_directives.find(query).sort("issued_at", -1).to_list(None)
+        documents = (
+            await self.department_directives.find(query)
+            .sort([("issued_at", -1), ("_id", -1)])
+            .to_list(None)
+        )
         return [DepartmentAlertDirectiveDocument.model_validate(document) for document in documents]
+
+    async def list_department_directives_page(
+        self,
+        target_department_id: ObjectId | None,
+        status: str | None,
+        offset: int,
+        limit: int,
+    ) -> Page[DepartmentAlertDirectiveDocument]:
+        query: dict[str, Any] = {}
+        if target_department_id is not None:
+            query["target_department_id"] = target_department_id
+        if status is not None:
+            query["status"] = status
+        total = await self.department_directives.count_documents(query)
+        documents = (
+            await self.department_directives.find(query)
+            .sort([("issued_at", -1), ("_id", -1)])
+            .skip(offset)
+            .limit(limit)
+            .to_list(None)
+        )
+        return Page(
+            items=[DepartmentAlertDirectiveDocument.model_validate(document) for document in documents],
+            total=total,
+        )
 
     async def acknowledge_department_directive(
         self,
@@ -333,8 +389,10 @@ class CoordinationRepository:
             return None
         return await self.find_department_directive(directive_id)
 
-    async def find_directive(self, directive_id: ObjectId) -> CoordinationDirectiveDocument | None:
-        document = await self.directives.find_one({"_id": directive_id})
+    async def find_directive(
+        self, directive_id: ObjectId, session: Any | None = None
+    ) -> CoordinationDirectiveDocument | None:
+        document = await self.directives.find_one({"_id": directive_id}, session=session)
         return CoordinationDirectiveDocument.model_validate(document) if document else None
 
     async def find_directive_by_alert(
@@ -351,8 +409,37 @@ class CoordinationRepository:
             query["target_department_id"] = target_department_id
         if status:
             query["status"] = status
-        documents = await self.directives.find(query).sort("issued_at", -1).to_list(None)
+        documents = (
+            await self.directives.find(query)
+            .sort([("issued_at", -1), ("_id", -1)])
+            .to_list(None)
+        )
         return [CoordinationDirectiveDocument.model_validate(document) for document in documents]
+
+    async def list_directives_page(
+        self,
+        target_department_id: ObjectId | None,
+        status: str | None,
+        offset: int,
+        limit: int,
+    ) -> Page[CoordinationDirectiveDocument]:
+        query: dict[str, Any] = {}
+        if target_department_id is not None:
+            query["target_department_id"] = target_department_id
+        if status:
+            query["status"] = status
+        total = await self.directives.count_documents(query)
+        documents = (
+            await self.directives.find(query)
+            .sort([("issued_at", -1), ("_id", -1)])
+            .skip(offset)
+            .limit(limit)
+            .to_list(None)
+        )
+        return Page(
+            items=[CoordinationDirectiveDocument.model_validate(document) for document in documents],
+            total=total,
+        )
 
     async def mark_directive_fulfilled(
         self,
@@ -360,6 +447,7 @@ class CoordinationRepository:
         plan_id: ObjectId,
         fulfilled_by: ObjectId,
         fulfilled_at: datetime,
+        session: Any | None = None,
     ) -> CoordinationDirectiveDocument | None:
         await self.directives.update_one(
             {"_id": directive_id, "status": "pending"},
@@ -373,11 +461,12 @@ class CoordinationRepository:
                     }
                 )
             },
+            session=session,
         )
-        return await self.find_directive(directive_id)
+        return await self.find_directive(directive_id, session=session)
 
-    async def insert_audit_log(self, document: dict[str, Any]) -> None:
-        await self.audit_logs.insert_one(normalize_mongo_value(document))
+    async def insert_audit_log(self, document: dict[str, Any], session: Any | None = None) -> None:
+        await self.audit_logs.insert_one(normalize_mongo_value(document), session=session)
 
     async def resolve_alert_for_coordination(
         self,
@@ -385,6 +474,7 @@ class CoordinationRepository:
         resolved_by: ObjectId,
         resolution_note: str,
         resolved_at: datetime,
+        session: Any | None = None,
     ) -> AlertDocument | None:
         await self.alerts.update_one(
             {"_id": alert_id, "status": "open"},
@@ -399,8 +489,9 @@ class CoordinationRepository:
                     }
                 )
             },
+            session=session,
         )
-        return await self.find_alert(alert_id)
+        return await self.find_alert(alert_id, session=session)
 
 
 __all__ = ["CoordinationRepository"]

@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import Modal from '../../components/Modal.jsx'
-import { useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { useActionFeedback } from '../../components/feedback/index.js'
+import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { generateIdempotencyKey } from '../../utils/idempotency.js'
 import {
   acknowledgeDepartmentTaskDirective,
   listDepartmentTaskDirectives,
@@ -10,6 +12,7 @@ import {
 } from './tasksApi.js'
 import {
   DIRECTIVE_SOURCE_LABELS,
+  getDirectiveStatusClass,
   getDirectiveStatusLabel,
 } from '../coordination/directiveLabels.js'
 
@@ -21,6 +24,7 @@ const FOCUS_LABELS = {
 }
 
 function ManagerTaskDirectives({ tasks }) {
+  const { confirmAction, notifyActionSuccess, notifyActionError } = useActionFeedback()
   const [searchParams, setSearchParams] = useSearchParams()
   const directiveId = searchParams.get('task_directive')
   const [directives, setDirectives] = useState([])
@@ -30,6 +34,7 @@ function ManagerTaskDirectives({ tasks }) {
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState('')
+  const idempotencyKeyRef = useRef(null)
 
   const loadDirectives = useCallback(async () => {
     setIsLoading(true)
@@ -47,9 +52,20 @@ function ManagerTaskDirectives({ tasks }) {
     void loadDirectives()
   }, [loadDirectives])
 
-  useRealtimeUpdates('task_directives', () => {
-    void loadDirectives()
-  })
+  useRealtimeUpdates(
+    'task_directives',
+    () => {
+      void loadDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
+  useRealtimeUpdates(
+    'tasks',
+    () => {
+      void loadDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
 
   useEffect(() => {
     if (!directiveId || isLoading) return
@@ -59,6 +75,9 @@ function ManagerTaskDirectives({ tasks }) {
       if (!isModalOpen) {
         setForm({ action_note: '', commitment_date: '', completion_note: '' })
         setError('')
+      }
+      if (directive && !idempotencyKeyRef.current) {
+        idempotencyKeyRef.current = generateIdempotencyKey()
       }
     } else {
       setSelected(null)
@@ -87,6 +106,7 @@ function ManagerTaskDirectives({ tasks }) {
       completion_note: '',
     })
     setError('')
+    idempotencyKeyRef.current = generateIdempotencyKey()
     setIsModalOpen(true)
   }
 
@@ -94,6 +114,7 @@ function ManagerTaskDirectives({ tasks }) {
     setSelected(directive)
     setForm({ action_note: '', commitment_date: '', completion_note: '' })
     setError('')
+    idempotencyKeyRef.current = generateIdempotencyKey()
     setIsModalOpen(true)
   }
 
@@ -101,17 +122,38 @@ function ManagerTaskDirectives({ tasks }) {
     event.preventDefault()
     if (!selected || isSaving) return
     const isSubmission = ['acknowledged', 'needs_revision'].includes(selected.status)
+    const confirmed = await confirmAction({
+      title: isSubmission ? 'Xác nhận gửi nghiệm thu giao việc' : 'Xác nhận tiếp nhận giao việc',
+      description: isSubmission
+        ? 'Báo cáo nghiệm thu sẽ được gửi đến Lãnh đạo để xem xét.'
+        : 'Bạn sẽ tiếp nhận giao việc và ghi nhận kế hoạch xử lý cho phòng ban.',
+      details: [
+        `Chỉ thị: ${selected.title || 'Giao việc quá hạn'}`,
+        `Số công việc liên quan: ${selected.task_ids?.length || 0}`,
+        isSubmission
+          ? `Nội dung nghiệm thu: ${form.completion_note.trim() || 'Không thêm ghi chú'}`
+          : `Ngày cam kết: ${form.commitment_date || 'Chưa xác định'}`,
+      ],
+      confirmLabel: isSubmission ? 'Xác nhận gửi nghiệm thu' : 'Xác nhận tiếp nhận',
+    })
+    if (!confirmed) return
     setIsSaving(true)
     setError('')
     try {
       const updatedDirective = isSubmission
-        ? await submitDepartmentTaskDirective(selected.id, {
-            completion_note: form.completion_note,
-          })
-        : await acknowledgeDepartmentTaskDirective(selected.id, {
-            action_note: form.action_note,
-            commitment_date: form.commitment_date,
-          })
+        ? await submitDepartmentTaskDirective(
+            selected.id,
+            { completion_note: form.completion_note },
+            idempotencyKeyRef.current,
+          )
+        : await acknowledgeDepartmentTaskDirective(
+            selected.id,
+            {
+              action_note: form.action_note,
+              commitment_date: form.commitment_date,
+            },
+            idempotencyKeyRef.current,
+          )
       setSelected(
         updatedDirective || {
           ...selected,
@@ -131,14 +173,25 @@ function ManagerTaskDirectives({ tasks }) {
         ),
       )
       setIsModalOpen(false)
+      idempotencyKeyRef.current = null
       await loadDirectives()
+      notifyActionSuccess({
+        title: isSubmission ? 'Đã gửi nghiệm thu giao việc' : 'Đã tiếp nhận giao việc',
+        message: `${selected.title || 'Giao việc quá hạn'} đã được cập nhật thành công.`,
+        details: [
+          isSubmission
+            ? 'Chỉ thị đang chờ Lãnh đạo nghiệm thu.'
+            : `Cam kết xử lý trước ${formatDate(form.commitment_date)}`,
+        ],
+      })
     } catch (requestError) {
-      setError(
+      const message =
         requestError.message ||
-          (['acknowledged', 'needs_revision'].includes(selected.status)
-            ? 'Không thể gửi nghiệm thu giao việc quá hạn.'
-            : 'Không thể xác nhận giao việc quá hạn.'),
-      )
+        (['acknowledged', 'needs_revision'].includes(selected.status)
+          ? 'Không thể gửi nghiệm thu giao việc quá hạn.'
+          : 'Không thể xác nhận giao việc quá hạn.')
+      setError(message)
+      notifyActionError({ title: 'Chưa cập nhật giao việc', message })
     } finally {
       setIsSaving(false)
     }
@@ -147,6 +200,7 @@ function ManagerTaskDirectives({ tasks }) {
   function closeDirective() {
     setSelected(null)
     setIsModalOpen(false)
+    idempotencyKeyRef.current = null
     const nextParams = new URLSearchParams(searchParams)
     nextParams.delete('task_directive')
     setSearchParams(nextParams, { replace: true })
@@ -267,12 +321,37 @@ function ManagerTaskDirectives({ tasks }) {
 function DirectiveProgressCard({ directive, tasks, isHighlighted, onAcknowledge, onSubmit }) {
   const navigate = useNavigate()
   const [isTaskListOpen, setIsTaskListOpen] = useState(false)
-  const completedTasks = tasks.filter((task) => task.status === 'done').length
-  const totalTasks = directive.task_ids?.length || 0
-  const progressPercent = totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0
-  const previewTasks = tasks.slice(0, 5)
-  const pendingTasks = tasks.filter((task) => task.status !== 'done')
-  const orderedTasks = [...pendingTasks, ...tasks.filter((task) => task.status === 'done')]
+  const directiveTaskIds = new Set(directive.task_ids || [])
+  const relatedTasks = directiveTaskIds.size
+    ? tasks.filter((task) => directiveTaskIds.has(task.id))
+    : tasks
+  const computedCompletedTasks = relatedTasks.filter((task) => task.status === 'done').length
+  const computedTotalTasks = directiveTaskIds.size || relatedTasks.length
+  const hasCompleteLocalTaskSet =
+    directiveTaskIds.size > 0 && relatedTasks.length === directiveTaskIds.size
+  const hasServerProgress = Number(directive.total_item_count) > 0 && !hasCompleteLocalTaskSet
+  const completedTasks = hasCompleteLocalTaskSet
+    ? computedCompletedTasks
+    : hasServerProgress
+      ? Number(directive.completed_item_count || 0)
+      : computedCompletedTasks
+  const totalTasks = hasCompleteLocalTaskSet
+    ? computedTotalTasks
+    : hasServerProgress
+      ? Number(directive.total_item_count)
+      : computedTotalTasks
+  const progressPercent = hasCompleteLocalTaskSet
+    ? totalTasks
+      ? Math.round((completedTasks / totalTasks) * 100)
+      : 0
+    : hasServerProgress
+      ? Number(directive.progress_percent || 0)
+      : totalTasks
+        ? Math.round((completedTasks / totalTasks) * 100)
+        : 0
+  const previewTasks = relatedTasks.slice(0, 5)
+  const pendingTasks = relatedTasks.filter((task) => task.status !== 'done')
+  const orderedTasks = [...pendingTasks, ...relatedTasks.filter((task) => task.status === 'done')]
 
   function openTask(task) {
     setIsTaskListOpen(false)
@@ -294,7 +373,7 @@ function DirectiveProgressCard({ directive, tasks, isHighlighted, onAcknowledge,
   return (
     <article
       id={`task-directive-${directive.id}`}
-      className={`rounded-xl bg-white p-4 shadow-sm ring-1 transition ${isHighlighted ? 'ring-brand-400 ring-2' : 'ring-slate-200'}`}
+      className={`rounded-xl bg-white p-4 shadow-sm ring-1 transition duration-motion-standard ease-motion-standard ${isHighlighted ? 'ring-brand-400 ring-2' : 'ring-slate-200'}`}
     >
       <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <div>
@@ -309,7 +388,7 @@ function DirectiveProgressCard({ directive, tasks, isHighlighted, onAcknowledge,
               </p>
             </div>
             <span
-              className={`rounded-full px-3 py-1 text-xs font-bold ${directive.status === 'pending' ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}
+              className={`rounded-full px-3 py-1 text-xs font-bold ${getDirectiveStatusClass('task', directive.status)}`}
             >
               {getDirectiveStatusLabel('task', directive.status)}
             </span>
@@ -389,7 +468,7 @@ function DirectiveProgressCard({ directive, tasks, isHighlighted, onAcknowledge,
           </div>
           <div className="mt-3 h-3 overflow-hidden rounded-full bg-slate-100">
             <div
-              className="h-full rounded-full bg-brand-600 transition-all"
+              className="h-full rounded-full bg-brand-600 transition-all duration-motion-standard ease-motion-standard"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
@@ -458,7 +537,7 @@ function DirectiveProgressCard({ directive, tasks, isHighlighted, onAcknowledge,
                     <button
                       key={task.id}
                       type="button"
-                      className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
+                      className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition duration-motion-micro ease-motion-standard hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
                       onClick={() => openTask(task)}
                     >
                       <span className="min-w-0">

@@ -2,6 +2,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.mongo_types import normalize_mongo_value
+from app.core.pagination import Page
 from app.models.threshold import ThresholdConfigDocument, ThresholdConfigStatus
 
 
@@ -23,6 +24,23 @@ class ThresholdConfigRepository:
         query = {"department_id": department_id} if department_id is not None else {}
         documents = await self.collection.find(query).sort("created_at", -1).to_list(length=None)
         return [ThresholdConfigDocument.model_validate(document) for document in documents]
+
+    async def find_many_page(
+        self, department_id: ObjectId | None, offset: int, limit: int
+    ) -> Page[ThresholdConfigDocument]:
+        query = {"department_id": department_id} if department_id is not None else {}
+        total = await self.collection.count_documents(query)
+        documents = (
+            await self.collection.find(query)
+            .sort("created_at", -1)
+            .skip(offset)
+            .limit(limit)
+            .to_list(length=None)
+        )
+        return Page(
+            items=[ThresholdConfigDocument.model_validate(document) for document in documents],
+            total=total,
+        )
 
     async def find_approved(self, department_id: ObjectId | None) -> ThresholdConfigDocument | None:
         query: dict[str, object] = {"status": ThresholdConfigStatus.APPROVED.value}

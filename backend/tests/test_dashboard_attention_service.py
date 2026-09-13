@@ -83,7 +83,9 @@ class FakeTaskRepository:
         self.calls.append((scope, overdue_only))
         return self.tasks
 
-    async def list_directed_task_ids(self) -> set[ObjectId]:
+    async def list_directed_task_ids(
+        self, statuses: set[str] | None = None
+    ) -> set[ObjectId]:
         return self.directed_task_ids
 
 
@@ -275,7 +277,7 @@ async def test_summary_excludes_directed_alerts_and_groups_overdue_tasks_by_empl
 
 
 @pytest.mark.asyncio
-async def test_leadership_summary_excludes_directed_overdue_tasks() -> None:
+async def test_leadership_summary_includes_directed_overdue_tasks() -> None:
     (
         service,
         _,
@@ -289,7 +291,7 @@ async def test_leadership_summary_excludes_directed_overdue_tasks() -> None:
 
     summary = await service.get_summary(None)
 
-    assert summary.overdue_task_count == 0
-    assert summary.overdue_task_total == 0
-    assert summary.overdue_department_count == 0
-    assert all(item.category != "overdue_task" for item in summary.items)
+    assert summary.overdue_task_count == 1
+    assert summary.overdue_task_total == 1
+    assert summary.overdue_department_count == 1
+    assert any(item.category == "overdue_task" for item in summary.items)

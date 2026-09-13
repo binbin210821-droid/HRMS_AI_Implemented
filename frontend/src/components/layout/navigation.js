@@ -31,7 +31,6 @@ const ROLE_NAVIGATION = {
       icon: 'employees',
     },
     { key: 'tasks', label: 'Công việc & deadline', href: '/manager/tasks', icon: 'tasks' },
-    { key: 'assistant', label: 'Trợ lý AI', href: '/manager/assistant', icon: 'assistant' },
   ],
   leadership: [
     { key: 'overview', label: 'Tổng quan', href: '/leadership', icon: 'dashboard' },
@@ -55,12 +54,11 @@ const ROLE_NAVIGATION = {
     },
     {
       key: 'managers',
-      label: 'Đánh giá phòng ban',
+      label: 'Đánh giá quản lý',
       href: '/leadership/department-evaluations',
       icon: 'performance',
     },
     { key: 'tasks', label: 'Công việc & deadline', href: '/leadership/tasks', icon: 'tasks' },
-    { key: 'assistant', label: 'Trợ lý AI', href: '/leadership/assistant', icon: 'assistant' },
   ],
 }
 

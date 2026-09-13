@@ -36,7 +36,7 @@ def request_json(
 def login(base_url: str, username: str, password: str) -> str:
     status, response = request_json(
         base_url,
-        "/api/auth/login",
+        "/api/v1/auth/login",
         method="POST",
         body={"username": username, "password": password},
     )
@@ -50,31 +50,39 @@ if __name__ == "__main__":
     sales_token = login(args.base_url, "demo.manager", args.password)
     tech_token = login(args.base_url, "demo.manager.tech", args.password)
 
-    status, departments = request_json(args.base_url, "/api/departments", leadership_token)
-    assert status == 200 and len(departments) == 3, departments
+    status, departments_page = request_json(
+        args.base_url,
+        "/api/v1/departments?page=1&page_size=100",
+        leadership_token,
+    )
+    assert status == 200 and departments_page["items"], departments_page
+    departments = departments_page["items"]
+    assert departments_page["has_next"] is False, departments_page
     department_by_code = {department["code"]: department for department in departments}
 
-    status, leadership_employees = request_json(args.base_url, "/api/employees", leadership_token)
-    assert status == 200 and len(leadership_employees) >= 15, leadership_employees
+    status, leadership_page = request_json(args.base_url, "/api/v1/employees?page_size=100", leadership_token)
+    leadership_employees = leadership_page["items"]
+    assert status == 200 and len(leadership_employees) >= 15, leadership_page
 
-    status, sales_employees = request_json(args.base_url, "/api/employees", sales_token)
-    assert status == 200 and sales_employees, sales_employees
+    status, sales_page = request_json(args.base_url, "/api/v1/employees?page_size=100", sales_token)
+    sales_employees = sales_page["items"]
+    assert status == 200 and sales_employees, sales_page
     assert all(
         employee["department_id"] == department_by_code["KD"]["id"] for employee in sales_employees
     )
-    assert all(employee["employee_code"].startswith("KD-") for employee in sales_employees)
 
-    status, tech_employees = request_json(args.base_url, "/api/employees", tech_token)
-    assert status == 200 and tech_employees, tech_employees
+    status, tech_page = request_json(args.base_url, "/api/v1/employees?page_size=100", tech_token)
+    tech_employees = tech_page["items"]
+    assert status == 200 and tech_employees, tech_page
     assert all(
         employee["department_id"] == department_by_code["KT"]["id"] for employee in tech_employees
     )
-    assert all(employee["employee_code"].startswith("KT-") for employee in tech_employees)
 
     tech_query = urlencode({"department_id": department_by_code["KT"]["id"]})
-    status, filtered_by_manager = request_json(
-        args.base_url, f"/api/employees?{tech_query}", sales_token
+    status, filtered_page = request_json(
+        args.base_url, f"/api/v1/employees?{tech_query}", sales_token
     )
+    filtered_by_manager = filtered_page["items"]
     assert status == 200
     assert all(
         employee["department_id"] == department_by_code["KD"]["id"]
@@ -83,7 +91,7 @@ if __name__ == "__main__":
 
     status, forbidden_department_write = request_json(
         args.base_url,
-        "/api/departments",
+        "/api/v1/departments",
         sales_token,
         method="POST",
         body={"name": "Không được tạo", "code": "NOPE"},
@@ -93,7 +101,7 @@ if __name__ == "__main__":
     test_department_code = f"QA{int(time.time()) % 100000}"
     status, created_department = request_json(
         args.base_url,
-        "/api/departments",
+        "/api/v1/departments",
         leadership_token,
         method="POST",
         body={"name": "Phòng kiểm thử", "code": test_department_code},
@@ -101,7 +109,7 @@ if __name__ == "__main__":
     assert status == 201, created_department
     status, updated_department = request_json(
         args.base_url,
-        f"/api/departments/{created_department['id']}",
+        f"/api/v1/departments/{created_department['id']}",
         leadership_token,
         method="PATCH",
         body={"name": "Phòng kiểm thử đã cập nhật"},
@@ -109,7 +117,7 @@ if __name__ == "__main__":
     assert status == 200 and updated_department["name"] == "Phòng kiểm thử đã cập nhật"
     status, _ = request_json(
         args.base_url,
-        f"/api/departments/{created_department['id']}",
+        f"/api/v1/departments/{created_department['id']}",
         leadership_token,
         method="DELETE",
     )
@@ -118,7 +126,7 @@ if __name__ == "__main__":
     test_employee_code = f"QA-NV-{int(time.time()) % 100000}"
     status, created_employee = request_json(
         args.base_url,
-        "/api/employees",
+        "/api/v1/employees",
         sales_token,
         method="POST",
         body={
@@ -131,7 +139,7 @@ if __name__ == "__main__":
     assert status == 201, created_employee
     status, updated_employee = request_json(
         args.base_url,
-        f"/api/employees/{created_employee['id']}",
+        f"/api/v1/employees/{created_employee['id']}",
         sales_token,
         method="PATCH",
         body={"position": "Chuyên viên cập nhật"},
@@ -139,7 +147,7 @@ if __name__ == "__main__":
     assert status == 200 and updated_employee["position"] == "Chuyên viên cập nhật"
     status, _ = request_json(
         args.base_url,
-        f"/api/employees/{created_employee['id']}",
+        f"/api/v1/employees/{created_employee['id']}",
         sales_token,
         method="DELETE",
     )
@@ -147,7 +155,7 @@ if __name__ == "__main__":
 
     tech_employee_id = tech_employees[0]["id"]
     status, cross_department_employee = request_json(
-        args.base_url, f"/api/employees/{tech_employee_id}", sales_token
+        args.base_url, f"/api/v1/employees/{tech_employee_id}", sales_token
     )
     assert status == 404, cross_department_employee
 

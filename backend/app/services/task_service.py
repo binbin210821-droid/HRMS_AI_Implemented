@@ -6,10 +6,13 @@ from typing import ClassVar, List, Literal, cast
 
 from bson import ObjectId
 from fastapi import HTTPException, status
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
+from app.core.mongo_types import to_mongo_datetime
+from app.core.pagination import Page
 from app.core.time import BusinessClock
 from app.models.task import (
+    ACTIVE_DIRECTIVE_STATUSES,
     AcknowledgeDepartmentTaskDirectiveRequest,
     DepartmentTaskDirectiveDocument,
     DepartmentTaskDirectiveResponse,
@@ -37,6 +40,9 @@ from app.services.department_service import parse_object_id
 class TaskService:
     """Business rules for assigning and tracking employee work."""
 
+    MAX_SAFE_OPEN_TASKS: ClassVar[int] = 4
+    MIN_PLANNED_DUE_DAYS: ClassVar[int] = 1
+
     def __init__(self, repository: TaskRepository, clock: BusinessClock | None = None) -> None:
         self.repository = repository
         self._clock = clock or BusinessClock()
@@ -55,13 +61,68 @@ class TaskService:
         documents = await self.repository.find_many(
             scope, employee_object_id, task_status.value if task_status else None, overdue_only
         )
-        # Notification Belt của Leadership chỉ được nhận các việc chưa nằm
-        # trong bất kỳ chỉ thị công việc cấp phòng ban nào. Manager vẫn nhìn
-        # thấy toàn bộ việc quá hạn trong phòng để tiếp tục xử lý thực tế.
-        if scope is None and overdue_only:
-            directed_task_ids = await self.repository.list_directed_task_ids()
-            documents = [document for document in documents if document.id not in directed_task_ids]
         return [await self._response(document) for document in documents]
+
+    async def list_page(
+        self,
+        scope: ObjectId | None,
+        employee_id: str | None,
+        task_status: TaskStatus | None,
+        overdue_only: bool,
+        offset: int,
+        limit: int,
+    ) -> Page[TaskResponse]:
+        await self.repository.ensure_indexes()
+        employee_object_id = self._parse_employee_id(employee_id) if employee_id else None
+        page = await self.repository.find_many_page(
+            scope,
+            employee_object_id,
+            task_status.value if task_status else None,
+            overdue_only,
+            offset,
+            limit,
+        )
+        return Page(items=[await self._response(document) for document in page.items], total=page.total)
+
+    async def list_page_v1(
+        self,
+        scope: ObjectId | None,
+        employee_id: str | None,
+        department_id: str | None,
+        task_status: TaskStatus | None,
+        overdue_only: bool,
+        from_date: Date | None,
+        to_date: Date | None,
+        sort_stage: dict[str, int],
+        page: int,
+        page_size: int,
+    ) -> Page[TaskResponse]:
+        await self.repository.ensure_indexes()
+        employee_object_id = self._parse_employee_id(employee_id) if employee_id else None
+        requested_department = (
+            parse_object_id(department_id, "Mã phòng ban") if department_id else None
+        )
+        due_date: dict[str, datetime] = {}
+        if from_date is not None:
+            due_date["$gte"] = to_mongo_datetime(from_date)
+        if to_date is not None:
+            due_date["$lt"] = to_mongo_datetime(to_date + timedelta(days=1))
+        result = await self.repository.find_many_page_v1(
+            scope,
+            employee_object_id,
+            requested_department,
+            task_status.value if task_status else None,
+            overdue_only,
+            due_date or None,
+            None,
+            sort_stage,
+            page,
+            page_size,
+        )
+        return Page(
+            items=[await self._response(document) for document in result.items],
+            total=result.total,
+        )
 
     async def get(self, task_id: str, scope: ObjectId | None) -> TaskResponse:
         document = await self.repository.find_by_id(self._parse_task_id(task_id), scope)
@@ -88,6 +149,8 @@ class TaskService:
             "title": request.title.strip(),
             "description": request.description.strip() if request.description else None,
             "subtasks": self._clean_subtasks(request.subtasks),
+            "estimated_effort_hours": request.estimated_effort_hours,
+            "required_skills": self._clean_skills(request.required_skills),
             "employee_id": employee.id,
             "department_id": employee.department_id,
             "priority": request.priority.value,
@@ -107,7 +170,11 @@ class TaskService:
         return await self._response(created)
 
     async def update(
-        self, task_id: str, request: TaskUpdate, scope: ObjectId | None
+        self,
+        task_id: str,
+        request: TaskUpdate,
+        scope: ObjectId | None,
+        updated_by: str | None = None,
     ) -> TaskResponse:
         self._require_manager_scope(scope)
         object_id = self._parse_task_id(task_id)
@@ -115,6 +182,14 @@ class TaskService:
         if existing is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy công việc"
+            )
+        if (
+            request.expected_updated_at is not None
+            and existing.updated_at != request.expected_updated_at
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Công việc đã thay đổi, vui lòng tải lại đề xuất trước khi áp dụng",
             )
 
         values = request.model_dump(exclude_unset=True)
@@ -128,12 +203,26 @@ class TaskService:
                 )
             values["employee_id"] = employee.id
             values["department_id"] = employee.department_id
+            if request.planning_version and employee.id != existing.employee_id:
+                assigned = await self.repository.find_many(scope, employee_id=employee.id)
+                open_tasks = [item for item in assigned if item.status != TaskStatus.DONE]
+                overdue_tasks = [item for item in open_tasks if item.due_date < self._clock.today()]
+                if len(open_tasks) >= self.MAX_SAFE_OPEN_TASKS or overdue_tasks:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            "Nhân viên được đề xuất đã thay đổi sức chứa hoặc có việc quá hạn; "
+                            "vui lòng tải lại đề xuất"
+                        ),
+                    )
         if "title" in values:
             values["title"] = values["title"].strip()
         if values.get("description"):
             values["description"] = values["description"].strip()
         if "subtasks" in values:
             values["subtasks"] = self._clean_subtasks(values["subtasks"])
+        if "required_skills" in values:
+            values["required_skills"] = self._clean_skills(values["required_skills"])
         if "priority" in values:
             values["priority"] = values["priority"].value
         if "status" in values:
@@ -141,12 +230,51 @@ class TaskService:
             values["completed_at"] = (
                 self._clock.now() if values["status"] == TaskStatus.DONE.value else None
             )
+        if request.planning_version:
+            planned_status = values.get("status", existing.status.value)
+            planned_due_date = values.get("due_date", existing.due_date)
+            minimum_due_date = self._clock.today() + timedelta(days=self.MIN_PLANNED_DUE_DAYS)
+            if planned_status != TaskStatus.DONE.value and planned_due_date < minimum_due_date:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Phương án phải đặt hạn hoàn thành mới trong tương lai",
+                )
         values["updated_at"] = self._clock.now()
-        updated = await self.repository.update(object_id, values, scope)
+        updated = await self.repository.update(
+            object_id,
+            values,
+            scope,
+            expected_updated_at=request.expected_updated_at,
+        )
         if updated is None:
+            if request.expected_updated_at is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Công việc đã thay đổi, vui lòng tải lại đề xuất trước khi áp dụng",
+                )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy công việc"
             )
+        if updated_by:
+            changed_employee = existing.employee_id != updated.employee_id
+            changed_deadline = existing.due_date != updated.due_date
+            if changed_employee or changed_deadline or request.planning_version:
+                await self.repository.insert_audit_log(
+                    {
+                        "action": "task_ai_plan_applied"
+                        if request.planning_version
+                        else "task_updated",
+                        "actor_id": self._parse_user_id(updated_by),
+                        "task_id": updated.id,
+                        "department_id": updated.department_id,
+                        "previous_employee_id": existing.employee_id,
+                        "employee_id": updated.employee_id,
+                        "previous_due_date": existing.due_date,
+                        "due_date": updated.due_date,
+                        "planning_version": request.planning_version,
+                        "created_at": self._clock.now(),
+                    }
+                )
         return await self._response(updated)
 
     async def delete(self, task_id: str, scope: ObjectId | None) -> None:
@@ -167,7 +295,9 @@ class TaskService:
         departments = await self.repository.list_departments()
         managers = await self.repository.list_active_managers()
         tasks = await self.repository.find_many(None)
-        directed_task_ids = await self.repository.list_directed_task_ids()
+        directed_task_ids = await self.repository.list_directed_task_ids(
+            ACTIVE_DIRECTIVE_STATUSES
+        )
         manager_map = {
             manager.department_id: manager.full_name
             for manager in managers
@@ -265,6 +395,12 @@ class TaskService:
             for directive in directives
             for task_id in directive.task_ids
         }
+        active_directive_task_ids = {
+            task_id
+            for directive in directives
+            if directive.status.value in ACTIVE_DIRECTIVE_STATUSES
+            for task_id in directive.task_ids
+        }
         tasks = await self.repository.find_department_tasks(object_id)
         period_start, period_end = self._period(range_preset)
         range_value = cast(Literal["7d", "30d", "90d"], range_preset)
@@ -292,6 +428,9 @@ class TaskService:
         if focus != "all":
             selected = {
                 TaskDirectiveFocus.OVERDUE.value: {task.id for task in overdue},
+                "not_directed": {
+                    task.id for task in overdue if task.id not in active_directive_task_ids
+                },
                 TaskDirectiveFocus.DUE_SOON.value: {task.id for task in due_soon},
                 TaskDirectiveFocus.HIGH_PRIORITY_OPEN.value: {
                     task.id for task in high_priority
@@ -319,12 +458,49 @@ class TaskService:
             range=range_value,
             period_start=period_start,
             period_end=period_end,
-            overdue=[self._portfolio_item(task, today, directive_by_task_id.get(task.id)) for task in overdue],
-            due_soon=[self._portfolio_item(task, today, directive_by_task_id.get(task.id)) for task in due_soon],
-            high_priority=[self._portfolio_item(task, today, directive_by_task_id.get(task.id)) for task in high_priority],
-            on_track=[self._portfolio_item(task, today, directive_by_task_id.get(task.id)) for task in on_track],
+            overdue=[
+                self._portfolio_item(
+                    task,
+                    today,
+                    directive_by_task_id.get(task.id),
+                    task.id in active_directive_task_ids,
+                )
+                for task in overdue
+            ],
+            due_soon=[
+                self._portfolio_item(
+                    task,
+                    today,
+                    directive_by_task_id.get(task.id),
+                    task.id in active_directive_task_ids,
+                )
+                for task in due_soon
+            ],
+            high_priority=[
+                self._portfolio_item(
+                    task,
+                    today,
+                    directive_by_task_id.get(task.id),
+                    task.id in active_directive_task_ids,
+                )
+                for task in high_priority
+            ],
+            on_track=[
+                self._portfolio_item(
+                    task,
+                    today,
+                    directive_by_task_id.get(task.id),
+                    task.id in active_directive_task_ids,
+                )
+                for task in on_track
+            ],
             completed_in_period=[
-                self._portfolio_item(task, today, directive_by_task_id.get(task.id))
+                self._portfolio_item(
+                    task,
+                    today,
+                    directive_by_task_id.get(task.id),
+                    task.id in active_directive_task_ids,
+                )
                 for task in completed
             ],
         )
@@ -361,7 +537,9 @@ class TaskService:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Không có công việc phù hợp để phát hành chỉ thị",
             )
-        directed_task_ids = await self.repository.list_directed_task_ids()
+        directed_task_ids = await self.repository.list_directed_task_ids(
+            ACTIVE_DIRECTIVE_STATUSES
+        )
         requested_task_ids = (
             {self._parse_task_id(task_id) for task_id in request.task_ids}
             if request.task_ids is not None
@@ -410,9 +588,15 @@ class TaskService:
             None,
         )
         if existing_pending is not None:
-            updated = await self.repository.append_department_directive_tasks(
-                existing_pending.id, [task.id for task in selected]
-            )
+            try:
+                updated = await self.repository.append_department_directive_tasks(
+                    existing_pending.id, [task.id for task in selected]
+                )
+            except (DuplicateKeyError, PyMongoError) as error:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Chỉ thị công việc vừa được cập nhật, vui lòng tải lại danh sách",
+                ) from error
             if updated is None:
                 current = await self.repository.find_department_directive(existing_pending.id)
                 if current is not None:
@@ -464,8 +648,16 @@ class TaskService:
                 (
                     item
                     for item in concurrent_directives
-                    if item.focus == request.focus
-                    or any(task_id in item.task_ids for task_id in selected_task_ids)
+                    if item.status in {
+                        DepartmentTaskDirectiveStatus.PENDING,
+                        DepartmentTaskDirectiveStatus.ACKNOWLEDGED,
+                        DepartmentTaskDirectiveStatus.SUBMITTED,
+                        DepartmentTaskDirectiveStatus.NEEDS_REVISION,
+                    }
+                    and (
+                        item.focus == request.focus
+                        or any(task_id in item.task_ids for task_id in selected_task_ids)
+                    )
                 ),
                 None,
             )
@@ -505,6 +697,33 @@ class TaskService:
             )
         directives = await self.repository.list_department_directives(scope, directive_status)
         return [await self._directive_response(item) for item in directives]
+
+    async def list_department_directives_page(
+        self,
+        scope: ObjectId | None,
+        directive_status: str | None,
+        offset: int,
+        limit: int,
+    ) -> Page[DepartmentTaskDirectiveResponse]:
+        await self.repository.ensure_indexes()
+        if directive_status and directive_status not in {
+            DepartmentTaskDirectiveStatus.PENDING.value,
+            DepartmentTaskDirectiveStatus.ACKNOWLEDGED.value,
+            DepartmentTaskDirectiveStatus.SUBMITTED.value,
+            DepartmentTaskDirectiveStatus.ACCEPTED.value,
+            DepartmentTaskDirectiveStatus.NEEDS_REVISION.value,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Trạng thái chỉ thị không hợp lệ",
+            )
+        page = await self.repository.list_department_directives_page(
+            scope, directive_status, offset, limit
+        )
+        return Page(
+            items=[await self._directive_response(item) for item in page.items],
+            total=page.total,
+        )
 
     async def acknowledge_department_directive(
         self,
@@ -850,6 +1069,7 @@ class TaskService:
         task: TaskDocument,
         today: Date,
         directive: DepartmentTaskDirectiveDocument | None = None,
+        has_active_directive: bool = False,
     ) -> DepartmentTaskPortfolioItemResponse:
         return DepartmentTaskPortfolioItemResponse(
             id=str(task.id),
@@ -862,6 +1082,7 @@ class TaskService:
             completed_at=task.completed_at,
             directive_id=str(directive.id) if directive else None,
             directive_status=directive.status.value if directive else None,
+            has_active_directive=has_active_directive,
         )
 
     def _utc_date(self, value: datetime) -> Date:
@@ -905,6 +1126,8 @@ class TaskService:
             title=document.title,
             description=document.description,
             subtasks=document.subtasks,
+            estimated_effort_hours=document.estimated_effort_hours,
+            required_skills=document.required_skills,
             employee_id=str(document.employee_id),
             employee_name=employee.full_name,
             employee_code=employee.employee_code,
@@ -922,6 +1145,12 @@ class TaskService:
     @staticmethod
     def _clean_subtasks(subtasks: List[str]) -> List[str]:
         return [item.strip() for item in subtasks if item and item.strip()]
+
+    @staticmethod
+    def _clean_skills(skills: List[str]) -> List[str]:
+        return list(
+            dict.fromkeys(item.strip().casefold() for item in skills if item and item.strip())
+        )
 
     @staticmethod
     def _parse_employee_id(value: str) -> ObjectId:

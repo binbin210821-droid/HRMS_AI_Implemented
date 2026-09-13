@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bar,
   BarChart,
@@ -13,29 +13,47 @@ import {
 } from 'recharts'
 
 import { FadeIn, SlideIn } from '../../components/animations/index.js'
-import { useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { Button, Select } from '../../components/ui/index.js'
+import {
+  REALTIME_COALESCE_DELAY_MS,
+  useCoalescedRealtimeUpdates,
+} from '../../hooks/useRealtimeUpdates.js'
 import { useAuthStore } from '../../stores/authStore.js'
 import { listAlerts } from '../alerts/alertsApi.js'
 import { listDepartments } from '../departments/departmentsApi.js'
 import { listEmployees } from '../employees/employeesApi.js'
 import { listOverloadLogs } from '../overload/overloadApi.js'
+import { listTasks } from '../tasks/tasksApi.js'
+import LeadershipPerformanceCharts from './LeadershipPerformanceCharts.jsx'
 import {
   getCompanyPerformanceAnalytics,
   getDepartmentPerformanceAnalytics,
   getEmployeePerformanceAnalytics,
-  listPerformance,
+  getDepartmentWeeklyTrend,
 } from './performanceApi.js'
 
 const EMPTY_MESSAGE = 'Chưa có dữ liệu hiệu suất trong khoảng thời gian này.'
+const BUSINESS_TIME_ZONE = 'Asia/Ho_Chi_Minh'
+
+function formatBusinessDate(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day}`
+}
 
 function getDateKey(value) {
   if (!value) return null
   const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
+  return Number.isNaN(date.getTime()) ? null : formatBusinessDate(date)
 }
 
 function getTodayKey() {
-  return new Date().toISOString().slice(0, 10)
+  return formatBusinessDate(new Date())
 }
 
 function shiftDateKey(dateKey, days) {
@@ -46,6 +64,20 @@ function shiftDateKey(dateKey, days) {
 
 function formatScore(value) {
   return value == null ? 'Chưa có dữ liệu' : Number(value).toFixed(1)
+}
+
+export function buildPerformanceComparison(items = []) {
+  const comparableItems = items.filter(
+    (item) =>
+      item.average_performance_score !== null && item.average_performance_score !== undefined,
+  )
+  return {
+    items: comparableItems.map((item) => ({
+      ...item,
+      performance: item.average_performance_score,
+    })),
+    missingCount: items.length - comparableItems.length,
+  }
 }
 
 function EmptyChart() {
@@ -68,16 +100,31 @@ function LoadingMessage({ message = 'Đang tải dữ liệu...' }) {
   )
 }
 
-function ChartCard({ title, description, actions, comparison, children }) {
+function ChartCard({ title, description, actions, comparison, className = '', children }) {
   return (
-    <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+    <section
+      className={`w-full min-w-0 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6 ${className}`}
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <h2 className="text-slate-900">{title}</h2>
         {actions}
       </div>
       <p className="mt-2 text-base leading-7 text-ink-600">{description}</p>
       {comparison && <div className="mt-3">{comparison}</div>}
-      <div className="mt-5">{children}</div>
+      <div className="mt-5 w-full min-w-0">{children}</div>
+    </section>
+  )
+}
+
+function DashboardSection({ eyebrow, title, description, children }) {
+  return (
+    <section className="w-full rounded-3xl border border-slate-200/80 bg-slate-50/70 p-4 sm:p-5">
+      <div className="mb-4 border-b border-slate-200/80 pb-4">
+        <p className="text-xs font-bold uppercase tracking-[0.16em] text-brand-700">{eyebrow}</p>
+        <h2 className="mt-1 text-xl font-bold text-slate-900">{title}</h2>
+        <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-600">{description}</p>
+      </div>
+      {children}
     </section>
   )
 }
@@ -89,51 +136,12 @@ function filterMetricsInRange(metrics, range) {
   })
 }
 
-function getWeekStart(dateKey) {
-  const date = new Date(`${dateKey}T00:00:00Z`)
-  const dayFromMonday = (date.getUTCDay() + 6) % 7
-  date.setUTCDate(date.getUTCDate() - dayFromMonday)
-  return date.toISOString().slice(0, 10)
-}
-
-function formatShortDate(dateKey) {
-  const date = new Date(`${dateKey}T00:00:00Z`)
-  return new Intl.DateTimeFormat('vi-VN', {
-    day: '2-digit',
-    month: '2-digit',
-  }).format(date)
-}
-
-function averageByWeek(metrics, range) {
-  const groups = new Map()
-  filterMetricsInRange(metrics, range).forEach((metric) => {
-    const score = Number(metric.performance_score)
-    const dateKey = getDateKey(metric.date)
-    if (!dateKey || !Number.isFinite(score)) return
-
-    const weekStart = getWeekStart(dateKey)
-    const group = groups.get(weekStart) || { total: 0, count: 0 }
-    group.total += score
-    group.count += 1
-    groups.set(weekStart, group)
-  })
-
-  return [...groups.entries()]
-    .sort(([first], [second]) => first.localeCompare(second))
-    .map(([weekStart, group]) => ({
-      weekStart,
-      weekLabel: formatShortDate(weekStart),
-      performance: Number((group.total / group.count).toFixed(1)),
-    }))
-}
-
-function averagePerformance(metrics, range) {
-  const scores = filterMetricsInRange(metrics, range)
-    .map((metric) => Number(metric.performance_score))
-    .filter((score) => Number.isFinite(score))
-
-  if (!scores.length) return null
-  return scores.reduce((total, score) => total + score, 0) / scores.length
+function normalizeWeeklyTrend(response) {
+  return (response?.weeks || []).map((week) => ({
+    weekStart: week.week_start,
+    weekLabel: week.week_label,
+    performance: week.performance,
+  }))
 }
 
 function filterByDateRange(items, getDate, range) {
@@ -190,7 +198,7 @@ function PeriodComparison({ current, previous, type }) {
   )
 }
 
-function PerformanceDashboard() {
+function PerformanceDashboard({ onCompanyAnalyticsChange }) {
   const role = useAuthStore((state) => state.role)
   const claims = useAuthStore((state) => state.claims)
   const [employees, setEmployees] = useState([])
@@ -203,9 +211,11 @@ function PerformanceDashboard() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
+  const employeeSelectionInitializedRef = useRef(false)
 
   const [weeklyMetrics, setWeeklyMetrics] = useState([])
-  const [previousWeeklyMetrics, setPreviousWeeklyMetrics] = useState([])
+  const [weeklyAverage, setWeeklyAverage] = useState(null)
+  const [previousWeeklyAverage, setPreviousWeeklyAverage] = useState(null)
   const [weeklyLoading, setWeeklyLoading] = useState(false)
   const [weeklyError, setWeeklyError] = useState('')
   const [overloadLogs, setOverloadLogs] = useState([])
@@ -216,6 +226,15 @@ function PerformanceDashboard() {
   const [alertsLoading, setAlertsLoading] = useState(false)
   const [alertsError, setAlertsError] = useState('')
   const [dateRangePreset, setDateRangePreset] = useState('30d')
+  const [leadershipWeeklyResponses, setLeadershipWeeklyResponses] = useState([])
+  const [leadershipWeeklyLoading, setLeadershipWeeklyLoading] = useState(false)
+  const [leadershipWeeklyError, setLeadershipWeeklyError] = useState('')
+  const [leadershipDepartmentResponses, setLeadershipDepartmentResponses] = useState([])
+  const [leadershipDepartmentLoading, setLeadershipDepartmentLoading] = useState(false)
+  const [leadershipDepartmentError, setLeadershipDepartmentError] = useState('')
+  const [leadershipTasks, setLeadershipTasks] = useState([])
+  const [leadershipTasksLoading, setLeadershipTasksLoading] = useState(false)
+  const [leadershipTasksError, setLeadershipTasksError] = useState('')
 
   const todayKey = getTodayKey()
   const dateRange = useMemo(() => {
@@ -237,29 +256,23 @@ function PerformanceDashboard() {
     [dateRange.previousEndDate, dateRange.previousStartDate],
   )
 
-  useRealtimeUpdates('performance_metrics', () => setRefreshKey((current) => current + 1))
+  useCoalescedRealtimeUpdates(
+    ['performance_metrics'],
+    () => setRefreshKey((current) => current + 1),
+    { delay: REALTIME_COALESCE_DELAY_MS },
+  )
 
   useEffect(() => {
     let active = true
     async function loadOptions() {
       try {
-        const [employeeData, departmentData, performanceData] = await Promise.all([
+        const [employeeData, departmentData] = await Promise.all([
           listEmployees(),
           listDepartments(),
-          listPerformance({ endDate: todayKey }),
         ])
         if (!active) return
         setEmployees(employeeData || [])
         setDepartments(departmentData || [])
-        const employeeIdsWithMetrics = new Set(
-          (performanceData || []).map((metric) => metric.employee_id),
-        )
-        const firstEmployeeWithMetrics = (employeeData || []).find((employee) =>
-          employeeIdsWithMetrics.has(employee.id),
-        )
-        setSelectedEmployeeId(
-          (current) => current || firstEmployeeWithMetrics?.id || employeeData?.[0]?.id || '',
-        )
         setSelectedDepartmentId(
           (current) => current || claims?.department_id || departmentData?.[0]?.id || '',
         )
@@ -273,7 +286,20 @@ function PerformanceDashboard() {
     return () => {
       active = false
     }
-  }, [claims?.department_id, todayKey])
+  }, [claims?.department_id])
+
+  useEffect(() => {
+    if (employeeSelectionInitializedRef.current || selectedEmployeeId) return
+    const defaultEmployee = departmentAnalytics?.employees?.find(
+      (employee) => employee.metric_days > 0,
+    )
+    const defaultEmployeeId =
+      defaultEmployee?.employee_id || departmentAnalytics?.employees?.[0]?.employee_id
+    if (!defaultEmployeeId) return
+
+    employeeSelectionInitializedRef.current = true
+    setSelectedEmployeeId(defaultEmployeeId)
+  }, [departmentAnalytics, selectedEmployeeId])
 
   useEffect(() => {
     if (!selectedEmployeeId) return undefined
@@ -298,20 +324,115 @@ function PerformanceDashboard() {
   }, [currentPeriod, refreshKey, selectedDepartmentId])
 
   useEffect(() => {
-    if (role !== 'leadership') return undefined
+    if (role !== 'leadership') {
+      onCompanyAnalyticsChange?.(null)
+      return undefined
+    }
     let active = true
     getCompanyPerformanceAnalytics(currentPeriod)
-      .then((data) => active && setCompanyAnalytics(data || null))
+      .then((data) => {
+        if (!active) return
+        const nextCompanyAnalytics = data || null
+        setCompanyAnalytics(nextCompanyAnalytics)
+        onCompanyAnalyticsChange?.(nextCompanyAnalytics)
+      })
       .catch(() => active && setError('Không thể tải tổng hợp hiệu suất toàn công ty.'))
     return () => {
       active = false
     }
-  }, [currentPeriod, refreshKey, role])
+  }, [currentPeriod, onCompanyAnalyticsChange, refreshKey, role])
+
+  useEffect(() => {
+    if (role !== 'leadership') {
+      setLeadershipWeeklyResponses([])
+      setLeadershipWeeklyError('')
+      return undefined
+    }
+    if (!departments.length) {
+      setLeadershipWeeklyResponses([])
+      return undefined
+    }
+
+    let active = true
+    setLeadershipWeeklyLoading(true)
+    setLeadershipWeeklyError('')
+    Promise.allSettled(
+      departments.map((department) => getDepartmentWeeklyTrend(department.id, currentPeriod)),
+    )
+      .then((results) => {
+        if (!active) return
+        const hasRejected = results.some((result) => result.status === 'rejected')
+        setLeadershipWeeklyResponses(
+          results.map((result) => (result.status === 'fulfilled' ? result.value : null)),
+        )
+        if (hasRejected) setLeadershipWeeklyError('Không thể tải đầy đủ xu hướng các phòng ban.')
+      })
+      .finally(() => active && setLeadershipWeeklyLoading(false))
+
+    return () => {
+      active = false
+    }
+  }, [currentPeriod, departments, refreshKey, role])
+
+  useEffect(() => {
+    if (role !== 'leadership') {
+      setLeadershipDepartmentResponses([])
+      setLeadershipDepartmentError('')
+      return undefined
+    }
+    if (!departments.length) {
+      setLeadershipDepartmentResponses([])
+      return undefined
+    }
+
+    let active = true
+    setLeadershipDepartmentLoading(true)
+    setLeadershipDepartmentError('')
+    Promise.allSettled(
+      departments.map((department) =>
+        getDepartmentPerformanceAnalytics(department.id, currentPeriod),
+      ),
+    )
+      .then((results) => {
+        if (!active) return
+        const hasRejected = results.some((result) => result.status === 'rejected')
+        setLeadershipDepartmentResponses(
+          results.map((result) => (result.status === 'fulfilled' ? result.value : null)),
+        )
+        if (hasRejected) setLeadershipDepartmentError('Không thể tải đầy đủ dữ liệu khen thưởng.')
+      })
+      .finally(() => active && setLeadershipDepartmentLoading(false))
+
+    return () => {
+      active = false
+    }
+  }, [currentPeriod, departments, refreshKey, role])
+
+  useEffect(() => {
+    if (role !== 'leadership') {
+      setLeadershipTasks([])
+      setLeadershipTasksError('')
+      return undefined
+    }
+
+    let active = true
+    setLeadershipTasksLoading(true)
+    setLeadershipTasksError('')
+    listTasks()
+      .then((data) => active && setLeadershipTasks(data || []))
+      .catch(() => active && setLeadershipTasksError('Không thể tải tiến độ công việc.'))
+      .finally(() => active && setLeadershipTasksLoading(false))
+
+    return () => {
+      active = false
+    }
+  }, [refreshKey, role])
 
   useEffect(() => {
     if (!selectedDepartmentId) {
       setWeeklyMetrics([])
-      setPreviousWeeklyMetrics([])
+      setWeeklyAverage(null)
+      setPreviousWeeklyAverage(null)
       return undefined
     }
 
@@ -319,20 +440,26 @@ function PerformanceDashboard() {
     setWeeklyLoading(true)
     setWeeklyError('')
     Promise.allSettled([
-      listPerformance({ departmentId: selectedDepartmentId, ...currentPeriod }),
-      listPerformance({ departmentId: selectedDepartmentId, ...previousPeriod }),
+      getDepartmentWeeklyTrend(selectedDepartmentId, currentPeriod),
+      getDepartmentWeeklyTrend(selectedDepartmentId, previousPeriod),
     ])
       .then(([currentResult, previousResult]) => {
         if (!active) return
         if (currentResult.status === 'fulfilled') {
-          setWeeklyMetrics(currentResult.value || [])
+          const currentTrend = currentResult.value || {}
+          setWeeklyMetrics(normalizeWeeklyTrend(currentTrend))
+          setWeeklyAverage(currentTrend.overall_average ?? null)
         } else {
           setWeeklyMetrics([])
+          setWeeklyAverage(null)
           setWeeklyError('Không thể tải xu hướng hiệu suất theo tuần.')
         }
-        setPreviousWeeklyMetrics(
-          previousResult.status === 'fulfilled' ? previousResult.value || [] : [],
-        )
+        if (previousResult.status === 'fulfilled') {
+          const previousTrend = previousResult.value || {}
+          setPreviousWeeklyAverage(previousTrend.overall_average ?? null)
+        } else {
+          setPreviousWeeklyAverage(null)
+        }
       })
       .finally(() => active && setWeeklyLoading(false))
 
@@ -345,7 +472,7 @@ function PerformanceDashboard() {
     let active = true
     setOverloadLoading(true)
     setOverloadError('')
-    listOverloadLogs()
+    listOverloadLogs({ startDate: previousPeriod.startDate, endDate: currentPeriod.endDate })
       .then((data) => active && setOverloadLogs(data || []))
       .catch(() => active && setOverloadError('Không thể tải tần suất quá tải.'))
       .finally(() => active && setOverloadLoading(false))
@@ -353,14 +480,17 @@ function PerformanceDashboard() {
     return () => {
       active = false
     }
-  }, [refreshKey])
+  }, [currentPeriod.endDate, previousPeriod.startDate, refreshKey])
 
   useEffect(() => {
     let active = true
     setAlertsLoading(true)
     setAlertsError('')
     // API mặc định chỉ trả early_warning; truyền all để tính đủ mọi loại cảnh báo.
-    listAlerts(undefined, 'all')
+    listAlerts(undefined, 'all', {
+      startDate: previousPeriod.startDate,
+      endDate: currentPeriod.endDate,
+    })
       .then((data) => active && setAlerts(data || []))
       .catch(() => active && setAlertsError('Không thể tải thời gian xử lý cảnh báo.'))
       .finally(() => active && setAlertsLoading(false))
@@ -368,32 +498,21 @@ function PerformanceDashboard() {
     return () => {
       active = false
     }
-  }, [refreshKey])
+  }, [currentPeriod.endDate, previousPeriod.startDate, refreshKey])
 
   const trendData = useMemo(
     () => filterMetricsInRange(employeeAnalytics?.metrics, currentPeriod),
     [currentPeriod, employeeAnalytics],
   )
-  const weeklyPerformance = useMemo(
-    () => averageByWeek(weeklyMetrics, currentPeriod),
-    [currentPeriod, weeklyMetrics],
-  )
-  const currentAveragePerformance = useMemo(
-    () => averagePerformance(weeklyMetrics, currentPeriod),
-    [currentPeriod, weeklyMetrics],
-  )
-  const previousAveragePerformance = useMemo(
-    () => averagePerformance(previousWeeklyMetrics, previousPeriod),
-    [previousPeriod, previousWeeklyMetrics],
-  )
-  const employeeComparison = useMemo(
-    () =>
-      (departmentAnalytics?.employees || []).map((employee) => ({
-        ...employee,
-        performance: employee.average_performance_score ?? 0,
-      })),
+  const weeklyPerformance = weeklyMetrics
+  const currentAveragePerformance = weeklyAverage
+  const previousAveragePerformance = previousWeeklyAverage
+  const employeeComparisonData = useMemo(
+    () => buildPerformanceComparison(departmentAnalytics?.employees || []),
     [departmentAnalytics],
   )
+  const employeeComparison = employeeComparisonData.items
+  const employeeWithoutDataCount = employeeComparisonData.missingCount
   const topFiveEmployees = useMemo(
     () =>
       [...employeeComparison]
@@ -464,14 +583,12 @@ function PerformanceDashboard() {
   const activeOverloadGroupBy = role === 'leadership' ? overloadGroupBy : 'employee'
   const overloadChartData =
     activeOverloadGroupBy === 'department' ? overloadByDepartment : overloadByEmployee
-  const departmentComparison = useMemo(
-    () =>
-      (companyAnalytics?.departments || []).map((department) => ({
-        ...department,
-        performance: department.average_performance_score ?? 0,
-      })),
+  const departmentComparisonData = useMemo(
+    () => buildPerformanceComparison(companyAnalytics?.departments || []),
     [companyAnalytics],
   )
+  const departmentComparison = departmentComparisonData.items
+  const departmentWithoutDataCount = departmentComparisonData.missingCount
   const averageResolutionHours = useMemo(
     () => calculateAverageResolution(alerts, currentPeriod),
     [alerts, currentPeriod],
@@ -491,42 +608,46 @@ function PerformanceDashboard() {
           <h2 className="mt-1 text-slate-900">Bảng tổng quan hiệu suất</h2>
         </div>
         <div className="grid w-full gap-3 sm:max-w-3xl sm:grid-cols-3">
-          <label className="text-sm font-medium text-slate-700">
-            Nhân viên
-            <select
-              className="form-input mt-1 min-w-0"
-              value={selectedEmployeeId}
-              onChange={(event) => setSelectedEmployeeId(event.target.value)}
-              disabled={isLoading}
-            >
-              <option value="">Chọn nhân viên</option>
-              {employees.map((employee) => (
-                <option key={employee.id} value={employee.id}>
-                  {employee.full_name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-sm font-medium text-slate-700">
-            Phòng ban
-            <select
-              className="form-input mt-1 min-w-0"
-              value={selectedDepartmentId}
-              onChange={(event) => setSelectedDepartmentId(event.target.value)}
-              disabled={isLoading}
-            >
-              <option value="">Chọn phòng ban</option>
-              {departments.map((department) => (
-                <option key={department.id} value={department.id}>
-                  {department.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          {role !== 'leadership' && (
+            <>
+              <label className="text-sm font-medium text-slate-700">
+                Nhân viên
+                <Select
+                  className="mt-1 min-w-0"
+                  value={selectedEmployeeId}
+                  onChange={(event) => setSelectedEmployeeId(event.target.value)}
+                  disabled={isLoading}
+                >
+                  <option value="">Chọn nhân viên</option>
+                  {employees.map((employee) => (
+                    <option key={employee.id} value={employee.id}>
+                      {employee.full_name}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <label className="text-sm font-medium text-slate-700">
+                Phòng ban
+                <Select
+                  className="mt-1 min-w-0"
+                  value={selectedDepartmentId}
+                  onChange={(event) => setSelectedDepartmentId(event.target.value)}
+                  disabled={isLoading}
+                >
+                  <option value="">Chọn phòng ban</option>
+                  {departments.map((department) => (
+                    <option key={department.id} value={department.id}>
+                      {department.name}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+            </>
+          )}
           <label className="text-sm font-medium text-slate-700">
             Khoảng thời gian
-            <select
-              className="form-input mt-1 min-w-0"
+            <Select
+              className="mt-1 min-w-0"
               value={dateRangePreset}
               onChange={(event) => setDateRangePreset(event.target.value)}
               disabled={isLoading}
@@ -534,328 +655,417 @@ function PerformanceDashboard() {
               <option value="7d">7 ngày gần nhất</option>
               <option value="30d">30 ngày gần nhất</option>
               <option value="quarter">Theo quý (90 ngày)</option>
-            </select>
+            </Select>
           </label>
         </div>
       </div>
 
       {error && <ErrorMessage message={error} />}
 
-      <FadeIn className="grid gap-6 xl:grid-cols-2">
-        <ChartCard
-          title={`Xu hướng của ${employeeAnalytics?.full_name || 'nhân viên'}`}
-          description="Biểu đồ cho biết điểm hiệu suất, chất lượng và số công việc của nhân viên thay đổi theo từng ngày."
-        >
-          {trendData.length ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={trendData} margin={{ top: 8, right: 12, left: 0, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={28} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Legend />
-                <Line
-                  type="monotone"
-                  dataKey="performance_score"
-                  name="Điểm hiệu suất"
-                  stroke="#2563eb"
-                  strokeWidth={3}
-                  dot={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="quality_score"
-                  name="Điểm chất lượng"
-                  stroke="#10b981"
-                  strokeWidth={2}
-                  dot={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <EmptyChart />
-          )}
-        </ChartCard>
-
-        <ChartCard
-          title={`So sánh nhân viên — ${departmentAnalytics?.department_name || 'phòng ban'}`}
-          description="Biểu đồ cho biết điểm hiệu suất trung bình của từng nhân viên trong phòng ban đang được xem."
-        >
-          {employeeComparison.length ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart
-                data={employeeComparison}
-                margin={{ top: 8, right: 12, left: 0, bottom: 42 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis
-                  dataKey="full_name"
-                  angle={-25}
-                  textAnchor="end"
-                  interval={0}
-                  tick={{ fontSize: 10 }}
-                />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} />
-                <Tooltip formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất']} />
-                <Bar
-                  dataKey="performance"
-                  name="Điểm hiệu suất"
-                  fill="#7c3aed"
-                  radius={[6, 6, 0, 0]}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <EmptyChart />
-          )}
-        </ChartCard>
-
-        <ChartCard
-          title="Xu hướng hiệu suất theo tuần"
-          description="Biểu đồ cho biết điểm hiệu suất trung bình theo từng tuần trong phạm vi bạn đang xem."
-          comparison={
-            <PeriodComparison
-              current={currentAveragePerformance}
-              previous={previousAveragePerformance}
-              type="performance"
-            />
-          }
-        >
-          {weeklyError ? (
-            <ErrorMessage message={weeklyError} />
-          ) : weeklyLoading ? (
-            <LoadingMessage message="Đang tải xu hướng theo tuần..." />
-          ) : weeklyPerformance.length ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart
-                data={weeklyPerformance}
-                margin={{ top: 8, right: 12, left: 0, bottom: 8 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="weekLabel" tick={{ fontSize: 11 }} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} />
-                <Tooltip
-                  formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất trung bình']}
-                  labelFormatter={(label) => `Tuần bắt đầu từ ${label}`}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="performance"
-                  name="Điểm hiệu suất trung bình"
-                  stroke="#0f766e"
-                  strokeWidth={3}
-                  dot={{ r: 4 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <EmptyChart />
-          )}
-        </ChartCard>
-
-        <ChartCard
-          title="Nhóm hiệu suất cần ưu tiên"
-          description="Hai biểu đồ giúp nhận diện nhanh nhân viên có kết quả nổi bật và nhân viên cần được hỗ trợ thêm trong phạm vi đang xem."
-        >
-          {employeeComparison.length ? (
-            <div className="grid gap-6 sm:grid-cols-2">
-              <div>
-                <h3 className="mb-3 text-base font-bold text-slate-800">Top 5 hiệu suất cao</h3>
-                <ResponsiveContainer width="100%" height={280}>
-                  <BarChart
-                    layout="vertical"
-                    data={topFiveEmployees}
-                    margin={{ left: 4, right: 12 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} />
-                    <YAxis
-                      type="category"
-                      dataKey="full_name"
-                      width={105}
-                      tick={{ fontSize: 10 }}
-                    />
-                    <Tooltip formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất']} />
-                    <Bar
-                      dataKey="performance"
-                      name="Điểm hiệu suất"
-                      fill="#16a34a"
-                      radius={[0, 6, 6, 0]}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-              <div>
-                <h3 className="mb-3 text-base font-bold text-slate-800">5 nhân viên cần hỗ trợ</h3>
-                <ResponsiveContainer width="100%" height={280}>
-                  <BarChart
-                    layout="vertical"
-                    data={bottomFiveEmployees}
-                    margin={{ left: 4, right: 12 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} />
-                    <YAxis
-                      type="category"
-                      dataKey="full_name"
-                      width={105}
-                      tick={{ fontSize: 10 }}
-                    />
-                    <Tooltip formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất']} />
-                    <Bar
-                      dataKey="performance"
-                      name="Điểm hiệu suất"
-                      fill="#f97316"
-                      radius={[0, 6, 6, 0]}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          ) : (
-            <EmptyChart />
-          )}
-        </ChartCard>
-
-        <ChartCard
-          title={
-            activeOverloadGroupBy === 'department'
-              ? 'Tần suất quá tải theo phòng ban'
-              : 'Tần suất quá tải theo nhân viên'
-          }
+      <FadeIn className="space-y-6">
+        <DashboardSection
+          eyebrow="Phân tích hiệu suất"
+          title={role === 'leadership' ? 'Tổng quan theo phòng ban' : 'Hiệu suất nhân viên'}
           description={
-            activeOverloadGroupBy === 'department'
-              ? 'Biểu đồ đếm số lần hệ thống ghi nhận dấu hiệu quá tải theo từng phòng ban trong phạm vi bạn được xem.'
-              : 'Biểu đồ đếm số lần hệ thống ghi nhận dấu hiệu quá tải của từng nhân viên trong phạm vi bạn được xem.'
-          }
-          comparison={
-            <PeriodComparison
-              current={currentOverloadCount}
-              previous={previousOverloadCount}
-              type="overload"
-            />
-          }
-          actions={
-            role === 'leadership' && (
-              <div
-                className="inline-flex rounded-xl bg-slate-100 p-1"
-                role="group"
-                aria-label="Cách nhóm dữ liệu quá tải"
-              >
-                {[
-                  ['employee', 'Theo nhân viên'],
-                  ['department', 'Theo phòng ban'],
-                ].map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                      activeOverloadGroupBy === value
-                        ? 'bg-white text-brand-700 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                    aria-pressed={activeOverloadGroupBy === value}
-                    onClick={() => setOverloadGroupBy(value)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            )
+            role === 'leadership'
+              ? 'Theo dõi đồng thời xu hướng hiệu suất, chất lượng, rủi ro và tiến độ của các phòng ban.'
+              : 'Theo dõi xu hướng, mức độ chênh lệch và nhóm nhân viên cần được hỗ trợ trong phòng ban.'
           }
         >
-          {overloadError ? (
-            <ErrorMessage message={overloadError} />
-          ) : overloadLoading ? (
-            <LoadingMessage message="Đang tải dữ liệu quá tải..." />
-          ) : overloadChartData.length ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart
-                data={overloadChartData}
-                margin={{ top: 8, right: 12, left: 0, bottom: 42 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis
-                  dataKey={
-                    activeOverloadGroupBy === 'department' ? 'department_name' : 'employee_name'
+          <div className="grid w-full min-w-0 gap-6 lg:grid-cols-2">
+            {role === 'leadership' && (
+              <LeadershipPerformanceCharts
+                departments={departments}
+                weeklyResponses={leadershipWeeklyResponses}
+                weeklyLoading={leadershipWeeklyLoading}
+                weeklyError={leadershipWeeklyError}
+                departmentResponses={leadershipDepartmentResponses}
+                departmentLoading={leadershipDepartmentLoading}
+                departmentError={leadershipDepartmentError}
+                overloadLogs={currentOverloadLogs}
+                tasks={leadershipTasks}
+                tasksLoading={leadershipTasksLoading}
+                tasksError={leadershipTasksError}
+              />
+            )}
+            {role !== 'leadership' && (
+              <>
+                <ChartCard
+                  title={`Xu hướng của ${employeeAnalytics?.full_name || 'nhân viên'}`}
+                  description="Biểu đồ cho biết điểm hiệu suất, chất lượng và số công việc của nhân viên thay đổi theo từng ngày."
+                >
+                  {trendData.length ? (
+                    <ResponsiveContainer width="100%" height={300}>
+                      <LineChart
+                        data={trendData}
+                        margin={{ top: 8, right: 12, left: 0, bottom: 8 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="date" tick={{ fontSize: 12 }} minTickGap={28} />
+                        <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
+                        <Tooltip />
+                        <Legend />
+                        <Line
+                          type="monotone"
+                          dataKey="performance_score"
+                          name="Điểm hiệu suất"
+                          stroke="#2563eb"
+                          strokeWidth={3}
+                          dot={false}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="quality_score"
+                          name="Điểm chất lượng"
+                          stroke="#10b981"
+                          strokeWidth={2}
+                          dot={false}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <EmptyChart />
+                  )}
+                </ChartCard>
+
+                <ChartCard
+                  title={`So sánh nhân viên — ${departmentAnalytics?.department_name || 'phòng ban'}`}
+                  description="Biểu đồ cho biết điểm hiệu suất trung bình của từng nhân viên trong phòng ban đang được xem."
+                >
+                  {employeeComparison.length ? (
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart
+                        data={employeeComparison}
+                        margin={{ top: 8, right: 12, left: 0, bottom: 42 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis
+                          dataKey="full_name"
+                          angle={-25}
+                          textAnchor="end"
+                          interval={0}
+                          tick={{ fontSize: 10 }}
+                        />
+                        <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
+                        <Tooltip
+                          formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất']}
+                        />
+                        <Bar
+                          dataKey="performance"
+                          name="Điểm hiệu suất"
+                          fill="#7c3aed"
+                          radius={[6, 6, 0, 0]}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <EmptyChart />
+                  )}
+                  {employeeWithoutDataCount > 0 && (
+                    <p className="mt-3 text-xs text-slate-500">
+                      {employeeWithoutDataCount} nhân viên chưa có dữ liệu trong khoảng thời gian
+                      này.
+                    </p>
+                  )}
+                </ChartCard>
+
+                <ChartCard
+                  title="Xu hướng hiệu suất theo tuần"
+                  description="Biểu đồ cho biết điểm hiệu suất trung bình theo từng tuần trong phạm vi bạn đang xem."
+                  comparison={
+                    <PeriodComparison
+                      current={currentAveragePerformance}
+                      previous={previousAveragePerformance}
+                      type="performance"
+                    />
                   }
-                  angle={-25}
-                  textAnchor="end"
-                  interval={0}
-                  tick={{ fontSize: 10 }}
-                />
-                <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
-                <Tooltip formatter={(value) => [value, 'Số lần quá tải']} />
-                <Bar dataKey="count" name="Số lần quá tải" fill="#dc2626" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <p className="flex h-64 items-center justify-center rounded-xl bg-emerald-50 px-4 text-center text-sm font-medium text-emerald-700">
-              Không có dấu hiệu quá tải trong phạm vi này.
-            </p>
-          )}
-        </ChartCard>
+                >
+                  {weeklyError ? (
+                    <ErrorMessage message={weeklyError} />
+                  ) : weeklyLoading ? (
+                    <LoadingMessage message="Đang tải xu hướng theo tuần..." />
+                  ) : weeklyPerformance.length ? (
+                    <ResponsiveContainer width="100%" height={300}>
+                      <LineChart
+                        data={weeklyPerformance}
+                        margin={{ top: 8, right: 12, left: 0, bottom: 8 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis dataKey="weekLabel" tick={{ fontSize: 12 }} />
+                        <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
+                        <Tooltip
+                          formatter={(value) => [
+                            Number(value).toFixed(1),
+                            'Điểm hiệu suất trung bình',
+                          ]}
+                          labelFormatter={(label) => `Tuần bắt đầu từ ${label}`}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="performance"
+                          name="Điểm hiệu suất trung bình"
+                          stroke="#0f766e"
+                          strokeWidth={3}
+                          dot={{ r: 4 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <EmptyChart />
+                  )}
+                </ChartCard>
 
-        <ChartCard
-          title="Thời gian xử lý cảnh báo trung bình"
-          description="Chỉ số cho biết trung bình cần bao lâu để hoàn tất xử lý một cảnh báo đã phát sinh trong phạm vi đang xem."
-          comparison={
-            <PeriodComparison
-              current={averageResolutionHours?.hours}
-              previous={previousAverageResolutionHours?.hours}
-              type="resolution"
-            />
-          }
+                <ChartCard
+                  title="Nhóm hiệu suất cần ưu tiên"
+                  description="Hai biểu đồ giúp nhận diện nhanh nhân viên có kết quả nổi bật và nhân viên cần được hỗ trợ thêm trong phạm vi đang xem."
+                >
+                  {employeeComparison.length ? (
+                    <div className="grid gap-6 sm:grid-cols-2">
+                      <div>
+                        <h3 className="mb-3 text-base font-bold text-slate-800">
+                          Top 5 hiệu suất cao
+                        </h3>
+                        <ResponsiveContainer width="100%" height={280}>
+                          <BarChart
+                            layout="vertical"
+                            data={topFiveEmployees}
+                            margin={{ left: 4, right: 12 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                            <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} />
+                            <YAxis
+                              type="category"
+                              dataKey="full_name"
+                              width={105}
+                              tick={{ fontSize: 10 }}
+                            />
+                            <Tooltip
+                              formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất']}
+                            />
+                            <Bar
+                              dataKey="performance"
+                              name="Điểm hiệu suất"
+                              fill="#16a34a"
+                              radius={[0, 6, 6, 0]}
+                            />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <div>
+                        <h3 className="mb-3 text-base font-bold text-slate-800">
+                          5 nhân viên cần hỗ trợ
+                        </h3>
+                        <ResponsiveContainer width="100%" height={280}>
+                          <BarChart
+                            layout="vertical"
+                            data={bottomFiveEmployees}
+                            margin={{ left: 4, right: 12 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                            <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} />
+                            <YAxis
+                              type="category"
+                              dataKey="full_name"
+                              width={105}
+                              tick={{ fontSize: 10 }}
+                            />
+                            <Tooltip
+                              formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất']}
+                            />
+                            <Bar
+                              dataKey="performance"
+                              name="Điểm hiệu suất"
+                              fill="#f97316"
+                              radius={[0, 6, 6, 0]}
+                            />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  ) : (
+                    <EmptyChart />
+                  )}
+                  {employeeWithoutDataCount > 0 && (
+                    <p className="mt-3 text-xs text-slate-500">
+                      {employeeWithoutDataCount} nhân viên chưa có dữ liệu trong khoảng thời gian
+                      này.
+                    </p>
+                  )}
+                </ChartCard>
+              </>
+            )}
+          </div>
+        </DashboardSection>
+
+        <DashboardSection
+          eyebrow="Theo dõi cảnh báo"
+          title="Cảnh báo và thời gian xử lý"
+          description="Đặt cạnh nhau tần suất quá tải và thời gian xử lý cảnh báo để nhận diện nhanh khu vực cần ưu tiên."
         >
-          {alertsError ? (
-            <ErrorMessage message={alertsError} />
-          ) : alertsLoading ? (
-            <LoadingMessage message="Đang tải thời gian xử lý..." />
-          ) : averageResolutionHours ? (
-            <div className="rounded-xl bg-slate-50 p-6 text-center ring-1 ring-slate-100">
-              <p className="text-4xl font-bold text-brand-700">
-                {averageResolutionHours.hours.toFixed(1)} giờ
-              </p>
-              <p className="mt-2 text-sm text-slate-600">
-                Tính từ {averageResolutionHours.count} cảnh báo đã xử lý.
-              </p>
-            </div>
-          ) : (
-            <p className="flex h-32 items-center justify-center rounded-xl bg-slate-50 px-4 text-center text-sm text-slate-500">
-              Chưa đủ dữ liệu để tính trung bình.
-            </p>
-          )}
-        </ChartCard>
-
-        {role === 'leadership' && (
-          <SlideIn direction="up" className="xl:col-span-2">
+          <div className="grid w-full min-w-0 gap-6 lg:grid-cols-2">
             <ChartCard
-              title="So sánh hiệu suất giữa các phòng ban"
-              description="Biểu đồ dành cho Lãnh đạo, giúp nhìn nhanh phòng ban nào đang có điểm hiệu suất trung bình cao hoặc thấp hơn."
+              title={
+                activeOverloadGroupBy === 'department'
+                  ? 'Tần suất quá tải theo phòng ban'
+                  : 'Tần suất quá tải theo nhân viên'
+              }
+              description={
+                activeOverloadGroupBy === 'department'
+                  ? 'Biểu đồ đếm số lần hệ thống ghi nhận dấu hiệu quá tải theo từng phòng ban trong phạm vi bạn được xem.'
+                  : 'Biểu đồ đếm số lần hệ thống ghi nhận dấu hiệu quá tải của từng nhân viên trong phạm vi bạn được xem.'
+              }
+              comparison={
+                <PeriodComparison
+                  current={currentOverloadCount}
+                  previous={previousOverloadCount}
+                  type="overload"
+                />
+              }
+              actions={
+                role === 'leadership' && (
+                  <div
+                    className="inline-flex rounded-xl bg-slate-100 p-1"
+                    role="group"
+                    aria-label="Cách nhóm dữ liệu quá tải"
+                  >
+                    {[
+                      ['employee', 'Theo nhân viên'],
+                      ['department', 'Theo phòng ban'],
+                    ].map(([value, label]) => (
+                      <Button
+                        key={value}
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className={`rounded-lg px-3 py-1.5 text-xs font-semibold shadow-none ${
+                          activeOverloadGroupBy === value
+                            ? 'bg-white text-brand-700 shadow-sm hover:bg-white'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                        aria-pressed={activeOverloadGroupBy === value}
+                        onClick={() => setOverloadGroupBy(value)}
+                      >
+                        {label}
+                      </Button>
+                    ))}
+                  </div>
+                )
+              }
             >
-              {departmentComparison.length ? (
-                <ResponsiveContainer width="100%" height={320}>
+              {overloadError ? (
+                <ErrorMessage message={overloadError} />
+              ) : overloadLoading ? (
+                <LoadingMessage message="Đang tải dữ liệu quá tải..." />
+              ) : overloadChartData.length ? (
+                <ResponsiveContainer width="100%" height={300}>
                   <BarChart
-                    data={departmentComparison}
-                    margin={{ top: 8, right: 12, left: 0, bottom: 30 }}
+                    data={overloadChartData}
+                    margin={{ top: 8, right: 12, left: 0, bottom: 42 }}
                   >
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="department_name" tick={{ fontSize: 11 }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 11 }} />
-                    <Tooltip formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất']} />
+                    <XAxis
+                      dataKey={
+                        activeOverloadGroupBy === 'department' ? 'department_name' : 'employee_name'
+                      }
+                      angle={-25}
+                      textAnchor="end"
+                      interval={0}
+                      tick={{ fontSize: 10 }}
+                    />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+                    <Tooltip formatter={(value) => [value, 'Số lần quá tải']} />
                     <Bar
-                      dataKey="performance"
-                      name="Điểm hiệu suất trung bình"
-                      fill="#ea580c"
+                      dataKey="count"
+                      name="Số lần quá tải"
+                      fill="#dc2626"
                       radius={[6, 6, 0, 0]}
                     />
                   </BarChart>
                 </ResponsiveContainer>
               ) : (
-                <EmptyChart />
+                <p className="flex h-64 items-center justify-center rounded-xl bg-emerald-50 px-4 text-center text-sm font-medium text-emerald-700">
+                  Không có dấu hiệu quá tải trong phạm vi này.
+                </p>
               )}
             </ChartCard>
-          </SlideIn>
+
+            <ChartCard
+              className="h-fit lg:self-start"
+              title="Thời gian xử lý cảnh báo trung bình"
+              description="Chỉ số cho biết trung bình cần bao lâu để hoàn tất xử lý một cảnh báo đã phát sinh trong phạm vi đang xem."
+              comparison={
+                <PeriodComparison
+                  current={averageResolutionHours?.hours}
+                  previous={previousAverageResolutionHours?.hours}
+                  type="resolution"
+                />
+              }
+            >
+              {alertsError ? (
+                <ErrorMessage message={alertsError} />
+              ) : alertsLoading ? (
+                <LoadingMessage message="Đang tải thời gian xử lý..." />
+              ) : averageResolutionHours ? (
+                <div className="rounded-xl bg-slate-50 p-6 text-center ring-1 ring-slate-100">
+                  <p className="text-4xl font-bold text-brand-700">
+                    {averageResolutionHours.hours.toFixed(1)} giờ
+                  </p>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Tính từ {averageResolutionHours.count} cảnh báo đã xử lý.
+                  </p>
+                </div>
+              ) : (
+                <p className="flex h-32 items-center justify-center rounded-xl bg-slate-50 px-4 text-center text-sm text-slate-500">
+                  Chưa đủ dữ liệu để tính trung bình.
+                </p>
+              )}
+            </ChartCard>
+          </div>
+        </DashboardSection>
+
+        {role === 'leadership' && (
+          <DashboardSection
+            eyebrow="Góc nhìn lãnh đạo"
+            title="So sánh tổng hợp giữa các phòng ban"
+            description="Biểu đồ tổng hợp giúp nhìn nhanh phòng ban nào đang có điểm hiệu suất trung bình cao hoặc thấp hơn."
+          >
+            <SlideIn direction="up" className="w-full">
+              <ChartCard
+                title="So sánh hiệu suất giữa các phòng ban"
+                description="Biểu đồ dành cho Lãnh đạo, giúp nhìn nhanh phòng ban nào đang có điểm hiệu suất trung bình cao hoặc thấp hơn."
+              >
+                {departmentComparison.length ? (
+                  <ResponsiveContainer width="100%" height={320}>
+                    <BarChart
+                      data={departmentComparison}
+                      margin={{ top: 8, right: 12, left: 0, bottom: 30 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="department_name" tick={{ fontSize: 12 }} />
+                      <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
+                      <Tooltip
+                        formatter={(value) => [Number(value).toFixed(1), 'Điểm hiệu suất']}
+                      />
+                      <Bar
+                        dataKey="performance"
+                        name="Điểm hiệu suất trung bình"
+                        fill="#ea580c"
+                        radius={[6, 6, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <EmptyChart />
+                )}
+                {departmentWithoutDataCount > 0 && (
+                  <p className="mt-3 text-xs text-slate-500">
+                    {departmentWithoutDataCount} phòng ban chưa có dữ liệu trong khoảng thời gian
+                    này.
+                  </p>
+                )}
+              </ChartCard>
+            </SlideIn>
+          </DashboardSection>
         )}
       </FadeIn>
 

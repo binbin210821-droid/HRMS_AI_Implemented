@@ -8,3 +8,4 @@ mypy
 types-python-jose
 boto3-stubs[s3]
 websockets
+PyYAML>=6.0,<7.0

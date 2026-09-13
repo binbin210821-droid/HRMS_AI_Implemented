@@ -1,6 +1,7 @@
 from bson import ObjectId
 from fastapi import HTTPException, status
 
+from app.core.pagination import Page
 from app.core.time import BusinessClock
 from app.models.threshold import (
     ThresholdConfigCreate,
@@ -35,6 +36,13 @@ class ThresholdConfigService:
         await self.repository.ensure_indexes()
         documents = await self.repository.find_many(scope)
         return [self._response(document) for document in documents]
+
+    async def list_page(
+        self, scope: ObjectId | None, offset: int, limit: int
+    ) -> Page[ThresholdConfigResponse]:
+        await self.repository.ensure_indexes()
+        page = await self.repository.find_many_page(scope, offset, limit)
+        return Page(items=[self._response(document) for document in page.items], total=page.total)
 
     async def propose(
         self, request: ThresholdConfigCreate, scope: ObjectId | None, proposed_by: str

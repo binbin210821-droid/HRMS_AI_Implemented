@@ -20,6 +20,7 @@ vi.mock('../components/layout/MainLayout.jsx', () => ({
 }))
 
 vi.mock('../hooks/useRealtimeUpdates.js', () => ({
+  REALTIME_COALESCE_DELAY: 250,
   useRealtimeUpdates: vi.fn(),
 }))
 
@@ -174,6 +175,19 @@ describe('DirectivesPage', () => {
     ).toBeInTheDocument()
   })
 
+  it('vẫn hiển thị chỉ thị của Manager sau khi đã tiếp nhận', async () => {
+    listDepartmentDirectives.mockResolvedValue([
+      { ...alertDirective, status: 'acknowledged', commitment_date: '2026-09-12' },
+    ])
+    listDepartmentTaskDirectives.mockResolvedValue([])
+    listDirectives.mockResolvedValue([])
+
+    renderPage()
+
+    expect(await screen.findByText('Đã tiếp nhận yêu cầu cảnh báo')).toBeInTheDocument()
+    expect(screen.getByText('1 đang thực hiện')).toBeInTheDocument()
+  })
+
   it('chỉ mở bối cảnh cho Leadership, không truyền query thao tác', async () => {
     renderPage('leadership')
 
@@ -186,6 +200,23 @@ describe('DirectivesPage', () => {
     expect(
       screen.getByText('/leadership/alerts?department_id=department-1&alert=alert-1'),
     ).toBeInTheDocument()
+  })
+
+  it('hiển thị chỉ thị đang chờ tiếp nhận của phòng ban ngay ở bộ lọc mặc định Leadership', async () => {
+    listDepartmentDirectives.mockResolvedValue([])
+    listDepartmentTaskDirectives.mockResolvedValue([
+      {
+        ...taskDirective,
+        target_department_name: 'Chăm sóc khách hàng',
+        status: 'pending',
+      },
+    ])
+    listDirectives.mockResolvedValue([])
+
+    renderPage('leadership')
+
+    expect(await screen.findByText('Chăm sóc khách hàng')).toBeInTheDocument()
+    expect(screen.getByText('Đang chờ nhận việc quá hạn')).toBeInTheDocument()
   })
 
   it('mở popup đọc lại chỉ thị đã nghiệm thu và không điều hướng sang nghiệp vụ', async () => {

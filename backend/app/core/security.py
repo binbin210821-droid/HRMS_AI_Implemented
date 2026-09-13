@@ -1,7 +1,9 @@
+import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Literal, cast
 
 import bcrypt
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Response, status
 from jose import jwt
 from jose.exceptions import JWTError
 
@@ -17,6 +19,75 @@ def verify_password(password: str, password_hash: str) -> bool:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
     except (ValueError, TypeError):
         return False
+
+
+def generate_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _cookie_samesite(settings: Settings) -> Literal["lax", "strict", "none"]:
+    value = settings.auth_cookie_samesite.lower()
+    if value not in {"lax", "strict", "none"}:
+        raise ValueError("AUTH_COOKIE_SAMESITE phải là lax, strict hoặc none")
+    return cast(Literal["lax", "strict", "none"], value)
+
+
+def set_auth_cookies(
+    response: Response,
+    token: str,
+    settings: Settings,
+    *,
+    csrf_token: str | None = None,
+) -> str:
+    csrf_value = csrf_token or generate_csrf_token()
+    response.set_cookie(
+        settings.auth_access_cookie_name,
+        token,
+        httponly=True,
+        max_age=settings.auth_cookie_max_age,
+        path="/",
+        domain=settings.auth_cookie_domain or None,
+        secure=settings.auth_cookie_secure,
+        samesite=_cookie_samesite(settings),
+    )
+    set_csrf_cookie(response, settings, csrf_value)
+    return csrf_value
+
+
+def set_csrf_cookie(response: Response, settings: Settings, csrf_token: str) -> None:
+    response.set_cookie(
+        settings.auth_csrf_cookie_name,
+        csrf_token,
+        max_age=settings.auth_cookie_max_age,
+        path="/",
+        domain=settings.auth_cookie_domain or None,
+        secure=settings.auth_cookie_secure,
+        httponly=False,
+        samesite=_cookie_samesite(settings),
+    )
+
+
+def ensure_csrf_cookie(response: Response, settings: Settings, existing: str | None) -> str:
+    csrf_value = existing or generate_csrf_token()
+    set_csrf_cookie(response, settings, csrf_value)
+    return csrf_value
+
+
+def clear_auth_cookies(response: Response, settings: Settings) -> None:
+    response.delete_cookie(
+        settings.auth_access_cookie_name,
+        path="/",
+        domain=settings.auth_cookie_domain or None,
+        secure=settings.auth_cookie_secure,
+        samesite=_cookie_samesite(settings),
+    )
+    response.delete_cookie(
+        settings.auth_csrf_cookie_name,
+        path="/",
+        domain=settings.auth_cookie_domain or None,
+        secure=settings.auth_cookie_secure,
+        samesite=_cookie_samesite(settings),
+    )
 
 
 def create_access_token(

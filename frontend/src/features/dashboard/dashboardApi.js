@@ -1,5 +1,5 @@
 import httpClient from '../../services/httpClient.js'
 
 export function getAttentionSummary() {
-  return httpClient('/api/dashboard/attention-summary')
+  return httpClient('/api/v1/dashboard/attention-summary')
 }

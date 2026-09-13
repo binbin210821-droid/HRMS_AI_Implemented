@@ -2,6 +2,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.mongo_types import normalize_mongo_value
+from app.core.pagination import Page, paginate_aggregate
 from app.models.department import DepartmentDocument
 
 
@@ -14,6 +15,35 @@ class DepartmentRepository:
         query = {"_id": scope} if scope is not None else {}
         documents = await self.collection.find(query).sort("name", 1).to_list(length=None)
         return [DepartmentDocument.model_validate(document) for document in documents]
+
+    async def find_many_page(
+        self, scope: ObjectId | None, offset: int, limit: int
+    ) -> Page[DepartmentDocument]:
+        query = {"_id": scope} if scope is not None else {}
+        total = await self.collection.count_documents(query)
+        documents = (
+            await self.collection.find(query)
+            .sort("name", 1)
+            .skip(offset)
+            .limit(limit)
+            .to_list(length=None)
+        )
+        return Page(
+            items=[DepartmentDocument.model_validate(document) for document in documents],
+            total=total,
+        )
+
+    async def find_many_page_v1(
+        self, scope: ObjectId | None, page: int, page_size: int
+    ) -> Page[DepartmentDocument]:
+        query = {"_id": scope} if scope is not None else {}
+        result = await paginate_aggregate(
+            self.collection, query, {"name": 1}, page, page_size
+        )
+        return Page(
+            items=[DepartmentDocument.model_validate(document) for document in result.items],
+            total=result.total,
+        )
 
     async def find_by_id(self, department_id: ObjectId) -> DepartmentDocument | None:
         document = await self.collection.find_one({"_id": department_id})

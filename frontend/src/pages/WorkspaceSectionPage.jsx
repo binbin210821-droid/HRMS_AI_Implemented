@@ -1,4 +1,4 @@
-import { useParams } from 'react-router-dom'
+import { Navigate, useParams } from 'react-router-dom'
 
 import { FadeIn } from '../components/animations/index.js'
 import MainLayout from '../components/layout/MainLayout.jsx'
@@ -9,10 +9,6 @@ const SECTION_CONTENT = {
     performance: {
       title: 'Hiệu suất nhân viên',
       description: 'Theo dõi kết quả và tiến độ của nhân sự trong phòng ban.',
-    },
-    assistant: {
-      title: 'Trợ lý AI',
-      description: 'Không gian hỗ trợ quản lý phân tích và lập kế hoạch hành động.',
     },
   },
   leadership: {
@@ -32,16 +28,15 @@ const SECTION_CONTENT = {
       title: 'Đánh giá quản lý',
       description: 'Theo dõi chất lượng quản trị và kết quả của các phòng ban.',
     },
-    assistant: {
-      title: 'Trợ lý AI',
-      description: 'Không gian hỗ trợ lãnh đạo tổng hợp thông tin toàn công ty.',
-    },
   },
 }
 
 function WorkspaceSectionPage() {
   const { section } = useParams()
   const { role } = useAuthStore()
+  if (section === 'assistant') {
+    return <Navigate to={role === 'leadership' ? '/leadership' : '/manager'} replace />
+  }
   const content = SECTION_CONTENT[role]?.[section] || {
     title: 'Không gian làm việc',
     description: 'Nội dung đang được chuẩn bị.',
@@ -50,7 +45,7 @@ function WorkspaceSectionPage() {
   return (
     <MainLayout>
       <FadeIn className="mx-auto max-w-6xl">
-        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <p className="!text-caption !font-semibold !uppercase !tracking-wider !text-brand-600">
             WorkMind
           </p>

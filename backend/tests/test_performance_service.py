@@ -50,6 +50,7 @@ class FakePerformanceRepository:
         self.inserted: list[dict] = []
         self.duplicate = False
         self.last_find_many: tuple = ()
+        self.weekly_average: dict = {"weeks": [], "overall_average": None}
 
     async def find_employee(self, employee_id: ObjectId) -> EmployeeDocument | None:
         return self.employees.get(employee_id)
@@ -72,6 +73,9 @@ class FakePerformanceRepository:
 
     async def aggregate_department_comparison(self, *_args) -> list[dict]:
         return []
+
+    async def aggregate_weekly_average(self, *_args) -> dict:
+        return self.weekly_average
 
     async def aggregate_company_comparison(self, *_args) -> list[dict]:
         return []
@@ -217,3 +221,56 @@ async def test_department_analytics_includes_employee_without_metrics() -> None:
     assert len(response.employees) == 1
     assert response.employees[0].average_performance_score is None
     assert response.employees[0].metric_days == 0
+
+
+@pytest.mark.asyncio
+async def test_department_weekly_trend_preserves_monday_week_and_overall_average() -> None:
+    department_id = ObjectId()
+    employee = make_employee(department_id)
+    repository = FakePerformanceRepository([employee])
+    repository.departments[department_id] = make_department(department_id)
+    repository.weekly_average = {
+        "weeks": [
+            {
+                "_id": datetime(2026, 9, 7, tzinfo=timezone.utc),
+                "performance": 86.25,
+                "quality": 82.34,
+            }
+        ],
+        "overall_average": 86.25,
+    }
+    response = await PerformanceService(repository).department_weekly_trend(
+        department_id, str(department_id), date(2026, 9, 1), date(2026, 9, 9)
+    )
+
+    assert response.department_id == str(department_id)
+    assert response.weeks[0].week_start == date(2026, 9, 7)
+    assert response.weeks[0].week_label == "07/09"
+    assert response.weeks[0].performance == 86.3
+    assert response.weeks[0].quality == 82.3
+    assert response.overall_average == 86.25
+
+
+@pytest.mark.asyncio
+async def test_department_weekly_trend_keeps_missing_quality_as_null() -> None:
+    department_id = ObjectId()
+    employee = make_employee(department_id)
+    repository = FakePerformanceRepository([employee])
+    repository.departments[department_id] = make_department(department_id)
+    repository.weekly_average = {
+        "weeks": [
+            {
+                "_id": datetime(2026, 9, 7, tzinfo=timezone.utc),
+                "performance": 86.25,
+                "quality": None,
+            }
+        ],
+        "overall_average": 86.25,
+    }
+
+    response = await PerformanceService(repository).department_weekly_trend(
+        department_id, str(department_id), date(2026, 9, 1), date(2026, 9, 9)
+    )
+
+    assert response.weeks[0].performance == 86.3
+    assert response.weeks[0].quality is None

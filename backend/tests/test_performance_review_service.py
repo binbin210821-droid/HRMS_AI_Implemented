@@ -6,7 +6,11 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from app.models.task import TaskDocument, TaskPriority, TaskStatus
-from app.models.task_execution import DailyPerformanceReviewCreate, DailyPerformanceReviewItem
+from app.models.task_execution import (
+    DailyPerformanceReviewCreate,
+    DailyPerformanceReviewItem,
+    EvidenceStatus,
+)
 from app.services.performance_review_service import PerformanceReviewService
 from tests.time_fixtures import FixedBusinessClock
 
@@ -49,9 +53,10 @@ class FakeTaskRepository:
     async def find_tasks_by_ids(self, _task_ids):
         return []
 
-    async def insert_audit_logs(self, documents):
+    async def insert_audit_logs(self, documents, session=None):
         self.audit_calls += 1
         self.audit_documents.extend(documents)
+        self.session = session
 
 
 class FakeReportRepository:
@@ -67,9 +72,10 @@ class FakeReportRepository:
     async def list_for_employee_date(self, _employee_id, _review_date):
         return list(self.reports.values())
 
-    async def bulk_update_manager_reviews(self, entries):
+    async def bulk_update_manager_reviews(self, entries, session=None):
         self.bulk_calls += 1
         self.entries = entries
+        self.session = session
         if self.fail:
             raise RuntimeError("partial bulk failure")
         return {entry["placeholder"]["task_id"]: SimpleNamespace() for entry in entries}
@@ -78,6 +84,7 @@ class FakeReportRepository:
 class FakePerformanceRepository:
     def __init__(self):
         self.metric_calls = 0
+        self.client = None
 
     async def ensure_indexes(self):
         return None
@@ -85,9 +92,40 @@ class FakePerformanceRepository:
     async def find_by_employee_date(self, _employee_id, _review_date):
         return None
 
-    async def upsert_daily_review(self, *_args):
+    async def upsert_daily_review(self, *_args, session=None):
         self.metric_calls += 1
+        self.session = session
         return SimpleNamespace(id=ObjectId())
+
+
+class FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class FakeSession:
+    def __init__(self):
+        self.transaction = FakeTransaction()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def start_transaction(self):
+        return self.transaction
+
+
+class FakeMongoClient:
+    def __init__(self):
+        self.session = FakeSession()
+
+    async def start_session(self):
+        return self.session
 
 
 def make_service(tasks, reports=None, report_failure=False):
@@ -104,6 +142,44 @@ def make_service(tasks, reports=None, report_failure=False):
         clock=FixedBusinessClock(datetime(2026, 9, 7, 12, tzinfo=timezone.utc)),
     )
     return service, task_repository, report_repository, performance_repository
+
+
+@pytest.mark.asyncio
+async def test_get_review_serializes_attachment_response_model():
+    employee_id = ObjectId()
+    department_id = ObjectId()
+    task = make_task(employee_id, department_id)
+    report = SimpleNamespace(
+        task_id=task.id,
+        attachments=[
+            SimpleNamespace(
+                attachment_id=None,
+                checksum="a" * 64,
+                storage_key="evidence/test.txt",
+                file_name="test.txt",
+                content_type="text/plain",
+                file_size=4,
+            )
+        ],
+        manager_review=SimpleNamespace(
+            score=90,
+            note=None,
+            change_reason=None,
+            evidence_status=EvidenceStatus.VERIFIED,
+            missing_reason=None,
+        ),
+        result_summary="Kết quả kiểm thử",
+        progress_percent=100,
+        outcome_status="completed",
+    )
+    service, _task_repository, _report_repository, _performance_repository = make_service(
+        [task], reports=[report]
+    )
+
+    result = await service.get_review(str(employee_id), date(2026, 9, 7), department_id)
+
+    assert result.tasks[0].attachments[0].attachment_id == "a" * 64
+    assert result.tasks[0].attachments[0].file_name == "test.txt"
 
 
 def request_for(tasks, reason="Không có minh chứng"):
@@ -137,6 +213,25 @@ async def test_save_review_batches_new_report_reviews_and_audit_log():
         "daily_performance_review_saved",
     ]
     assert performance_repository.metric_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_save_review_propagates_one_mongo_transaction_session_to_all_writes():
+    tasks = [make_task(ObjectId(), ObjectId())]
+    service, task_repository, report_repository, performance_repository = make_service(tasks)
+    performance_repository.client = FakeMongoClient()
+
+    async def response(*_args, **_kwargs):
+        return "review-response"
+
+    service.get_review = response
+    result = await service.save_review(request_for(tasks), tasks[0].department_id, str(ObjectId()))
+
+    assert result == "review-response"
+    session = performance_repository.client.session
+    assert report_repository.session is session
+    assert performance_repository.session is session
+    assert task_repository.session is session
 
 
 @pytest.mark.asyncio
@@ -178,9 +273,7 @@ async def test_save_review_uses_existing_report_and_records_review_audit():
 async def test_update_review_requires_reason_when_task_score_changes():
     task = make_task(ObjectId(), ObjectId())
     existing_review = SimpleNamespace(score=80, change_reason=None)
-    existing = SimpleNamespace(
-        task_id=task.id, manager_review=existing_review, attachments=[]
-    )
+    existing = SimpleNamespace(task_id=task.id, manager_review=existing_review, attachments=[])
     service, _task_repository, report_repository, _performance_repository = make_service(
         [task], reports=[existing]
     )
@@ -208,9 +301,7 @@ async def test_update_review_requires_reason_when_task_score_changes():
 async def test_update_review_stores_reason_for_changed_task_score():
     task = make_task(ObjectId(), ObjectId())
     existing_review = SimpleNamespace(score=80, change_reason=None)
-    existing = SimpleNamespace(
-        task_id=task.id, manager_review=existing_review, attachments=[]
-    )
+    existing = SimpleNamespace(task_id=task.id, manager_review=existing_review, attachments=[])
     service, task_repository, report_repository, _performance_repository = make_service(
         [task], reports=[existing]
     )
@@ -240,6 +331,50 @@ async def test_update_review_stores_reason_for_changed_task_score():
     )
     assert task_repository.audit_documents[0]["action"] == "task_score_changed"
     assert task_repository.audit_documents[0]["old_score"] == 80
+
+
+@pytest.mark.asyncio
+async def test_update_review_uses_operation_reason_as_task_and_summary_audit_reason():
+    task = make_task(ObjectId(), ObjectId())
+    existing_review = SimpleNamespace(score=80, change_reason=None)
+    existing = SimpleNamespace(task_id=task.id, manager_review=existing_review, attachments=[])
+    service, task_repository, report_repository, _performance_repository = make_service(
+        [task], reports=[existing]
+    )
+
+    async def response(*_args, **_kwargs):
+        return "review-response"
+
+    service.get_review = response
+    request = DailyPerformanceReviewCreate(
+        employee_id=str(task.employee_id),
+        date=date(2026, 9, 7),
+        items=[
+            DailyPerformanceReviewItem(
+                task_id=str(task.id),
+                score=90,
+                missing_reason="Đã xem kết quả trên hệ thống",
+            )
+        ],
+    )
+
+    result = await service.update_review(
+        request,
+        task.department_id,
+        str(ObjectId()),
+        reason="Điều chỉnh sau khi rà soát toàn bộ kết quả",
+    )
+
+    assert result == "review-response"
+    assert report_repository.entries[0]["review"]["change_reason"] == (
+        "Điều chỉnh sau khi rà soát toàn bộ kết quả"
+    )
+    assert task_repository.audit_documents[0]["change_reason"] == (
+        "Điều chỉnh sau khi rà soát toàn bộ kết quả"
+    )
+    assert task_repository.audit_documents[-1]["change_reason"] == (
+        "Điều chỉnh sau khi rà soát toàn bộ kết quả"
+    )
 
 
 @pytest.mark.asyncio

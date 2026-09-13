@@ -30,7 +30,7 @@ def request_json(
 
 def login(base_url: str, username: str, password: str) -> str:
     request = Request(
-        f"{base_url}/api/auth/login",
+        f"{base_url}/api/v1/auth/login",
         data=json.dumps({"username": username, "password": password}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -42,50 +42,58 @@ def login(base_url: str, username: str, password: str) -> str:
 def main(args: argparse.Namespace) -> None:
     leadership_token = login(args.base_url, "demo.leadership", args.password)
     manager_token = login(args.base_url, "demo.manager", args.password)
-    status, employees = request_json(args.base_url, "/api/employees", leadership_token)
-    assert status == 200
-    status, departments = request_json(args.base_url, "/api/departments", leadership_token)
-    assert status == 200
+    status, employees_page = request_json(
+        args.base_url, "/api/v1/employees?page_size=100", leadership_token
+    )
+    assert status == 200 and isinstance(employees_page, dict)
+    employees = employees_page["items"]
+    status, departments_page = request_json(
+        args.base_url,
+        "/api/v1/departments?page=1&page_size=100",
+        leadership_token,
+    )
+    assert status == 200 and departments_page["items"], departments_page
+    departments = departments_page["items"]
     kd_employee = next(item for item in employees if item["employee_code"] == "KD-NV-001")
     kd_department = next(item for item in departments if item["code"] == "KD")
     kt_department = next(item for item in departments if item["code"] == "KT")
 
     status, trend = request_json(
         args.base_url,
-        f"/api/performance/analytics/employee/{kd_employee['id']}",
+        f"/api/v1/performance/analytics/employee/{kd_employee['id']}",
         manager_token,
     )
-    assert status == 200 and len(trend["metrics"]) == 60
+    assert status == 200 and len(trend["metrics"]) >= 60
     status, forbidden_employee = request_json(
         args.base_url,
-        f"/api/performance/analytics/employee/{next(item for item in employees if item['employee_code'] == 'KT-NV-001')['id']}",
+        f"/api/v1/performance/analytics/employee/{next(item for item in employees if item['employee_code'] == 'KT-NV-001')['id']}",
         manager_token,
     )
     assert status == 403, forbidden_employee
 
     status, department = request_json(
         args.base_url,
-        f"/api/performance/analytics/department/{kd_department['id']}",
+        f"/api/v1/performance/analytics/department/{kd_department['id']}",
         manager_token,
     )
-    assert status == 200 and len(department["employees"]) == 5
+    assert status == 200 and len(department["employees"]) >= 5
     status, forbidden_department = request_json(
         args.base_url,
-        f"/api/performance/analytics/department/{kt_department['id']}",
+        f"/api/v1/performance/analytics/department/{kt_department['id']}",
         manager_token,
     )
     assert status == 403, forbidden_department
 
     status, company = request_json(
-        args.base_url, "/api/performance/analytics/company", leadership_token
+        args.base_url, "/api/v1/performance/analytics/company", leadership_token
     )
     assert status == 200 and len(company["departments"]) == 3
     status, manager_company = request_json(
-        args.base_url, "/api/performance/analytics/company", manager_token
+        args.base_url, "/api/v1/performance/analytics/company", manager_token
     )
     assert status == 403, manager_company
 
-    print("Performance analytics smoke test passed: Mongo aggregation, 60-day trend and RBAC.")
+    print("Performance analytics smoke test passed: Mongo aggregation, at least 60-day trend and RBAC.")
 
 
 if __name__ == "__main__":

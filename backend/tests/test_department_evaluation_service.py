@@ -216,6 +216,22 @@ async def test_create_weekly_evaluation_calculates_score_and_keeps_one_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_weekly_review_normalizes_any_date_to_monday():
+    department_id = ObjectId()
+    service = DepartmentEvaluationService(
+        FakeRepository(department_id),
+        FakeStorage(),
+        settings(),
+        clock=FixedBusinessClock(datetime(2026, 9, 12, 3, tzinfo=timezone.utc)),
+    )
+
+    review = await service.weekly_review(str(department_id), date(2026, 9, 12))
+
+    assert review.week_start == date(2026, 9, 7)
+    assert review.week_end == date(2026, 9, 11)
+
+
+@pytest.mark.asyncio
 async def test_weekly_evidence_uses_manager_submission_for_lateness_not_acceptance():
     department_id = ObjectId()
     repository = FakeRepository(department_id)

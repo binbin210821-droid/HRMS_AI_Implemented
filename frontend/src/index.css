@@ -5,22 +5,48 @@
 :root {
   font-family:
     Inter,
+    'Segoe UI',
     ui-sans-serif,
     system-ui,
     -apple-system,
     BlinkMacSystemFont,
-    'Segoe UI',
     sans-serif;
   color: #0f172a;
   background: #f8fafc;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  --motion-micro: 180ms;
+  --motion-standard: 300ms;
+  --motion-emphasis: 550ms;
+  --motion-ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 body {
   margin: 0;
   min-width: 320px;
   background: #f8fafc;
+  color: #334155;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  transition-property: color, background-color, border-color, outline-color, box-shadow;
+  transition-duration: var(--motion-micro);
+  transition-timing-function: var(--motion-ease-standard);
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
 }
 
 @layer base {
@@ -43,19 +69,27 @@ body {
 
 @layer components {
   .primary-button {
-    @apply rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-brand-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm transition active:scale-[0.98] hover:bg-brand-700 focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
+    transition-duration: var(--motion-micro);
+    transition-timing-function: var(--motion-ease-standard);
   }
 
   .secondary-button {
-    @apply rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-600 transition active:scale-[0.98] hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60;
+    transition-duration: var(--motion-micro);
+    transition-timing-function: var(--motion-ease-standard);
   }
 
   .form-input {
-    @apply block w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
+    @apply block w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
+    transition-duration: var(--motion-micro);
+    transition-timing-function: var(--motion-ease-standard);
   }
 
   .table-action {
-    @apply ml-3 text-sm font-semibold text-brand-600 hover:text-brand-800;
+    @apply ml-3 text-sm font-semibold text-brand-600 transition-colors hover:text-brand-800;
+    transition-duration: var(--motion-micro);
+    transition-timing-function: var(--motion-ease-standard);
   }
 
   .table-action-danger {
@@ -64,7 +98,9 @@ body {
 
   .status-active,
   .status-inactive {
-    @apply inline-flex rounded-full px-2.5 py-1 text-xs font-semibold;
+    @apply inline-flex rounded-full px-2.5 py-1 text-xs font-semibold transition-colors;
+    transition-duration: var(--motion-micro);
+    transition-timing-function: var(--motion-ease-standard);
   }
 
   .status-active {
@@ -83,7 +119,9 @@ body {
   .task-status-in_progress,
   .task-status-done,
   .task-status-overdue {
-    @apply inline-flex rounded-md px-2 py-1 text-xs font-semibold;
+    @apply inline-flex rounded-md px-2 py-1 text-xs font-semibold transition-colors;
+    transition-duration: var(--motion-micro);
+    transition-timing-function: var(--motion-ease-standard);
   }
 
   .status-danger,
@@ -114,10 +152,14 @@ body {
 
   .task-event-chip {
     @apply flex w-full min-w-0 flex-col items-start gap-0.5 text-left transition hover:brightness-95;
+    transition-duration: var(--motion-micro);
+    transition-timing-function: var(--motion-ease-standard);
   }
 
   .calendar-day-cell {
     @apply relative min-h-[140px] cursor-pointer border-b border-l border-slate-200 bg-white p-2 transition hover:bg-brand-50/30;
+    transition-duration: var(--motion-standard);
+    transition-timing-function: var(--motion-ease-standard);
   }
 
   .calendar-day-outside {
@@ -133,12 +175,13 @@ body {
   }
 
   .notification-bell-icon {
-    animation: notification-bell-ring 2.8s ease-in-out infinite;
+    animation: notification-bell-ring 900ms ease-in-out 1;
     transform-origin: 50% 15%;
   }
 
-  .notification-reminder {
-    animation: notification-reminder 10s ease-in-out forwards;
+  .alert-trend-bar {
+    animation: alert-trend-bar-rise var(--motion-emphasis) var(--trend-delay, 0ms) both;
+    transform-origin: bottom;
   }
 }
 
@@ -170,27 +213,29 @@ body {
   }
 }
 
-@keyframes notification-reminder {
-  0% {
-    opacity: 0;
-    transform: translateY(-8px);
+@keyframes alert-trend-bar-rise {
+  from {
+    opacity: 0.35;
+    transform: scaleY(0);
   }
 
-  12%,
-  82% {
+  to {
     opacity: 1;
-    transform: translateY(0);
-  }
-
-  100% {
-    opacity: 0;
-    transform: translateY(-4px);
+    transform: scaleY(1);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .notification-bell-icon,
-  .notification-reminder {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .notification-bell-icon {
     animation: none;
   }
 }

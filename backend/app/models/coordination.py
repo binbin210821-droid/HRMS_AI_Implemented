@@ -106,19 +106,8 @@ class CoordinationDirectiveResponse(BaseModel):
     issued_at: datetime
     fulfilled_plan_id: str | None = None
     fulfilled_by: str | None = None
+    fulfilled_by_name: str | None = None
     fulfilled_at: datetime | None = None
-
-
-class DirectiveTargetResponse(BaseModel):
-    department_id: str
-    department_name: str
-    available_employee_count: int
-
-
-class IssueDirectiveRequest(BaseModel):
-    target_department_id: str
-    tasks_to_transfer: int | None = Field(default=None, ge=1, le=2)
-    note: str | None = Field(default=None, max_length=1000)
 
 
 class FulfillDirectiveRequest(BaseModel):
@@ -247,10 +236,8 @@ __all__ = [
     "DepartmentAlertDirectiveDocument",
     "DepartmentAlertDirectiveResponse",
     "DepartmentAlertDirectiveStatus",
-    "DirectiveTargetResponse",
     "FulfillDirectiveRequest",
     "IssueDepartmentAlertDirectiveRequest",
-    "IssueDirectiveRequest",
     "ReviewDepartmentAlertDirectiveRequest",
     "SubmitDepartmentAlertDirectiveRequest",
 ]

@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { AnimatePresence } from 'framer-motion'
 
+import { AnimatedTableRows, FadeIn, StaggerList } from '../../../components/animations/index.js'
 import Modal from '../../../components/Modal.jsx'
 import TaskEventChip from './TaskEventChip.jsx'
 import {
@@ -211,27 +213,33 @@ function DayCell({
         {forceExpanded ? (
           <DayTaskTable tasks={tasks} colorMode={colorMode} onTaskClick={handleTaskClick} />
         ) : (
-          visibleTasks.map((task) => (
-            <TaskEventChip
-              key={task.id}
-              task={task}
-              colorMode={colorMode}
-              onClick={handleTaskClick}
-            />
-          ))
+          <StaggerList className="space-y-1">
+            {visibleTasks.map((task) => (
+              <TaskEventChip
+                key={task.id}
+                task={task}
+                colorMode={colorMode}
+                onClick={handleTaskClick}
+              />
+            ))}
+          </StaggerList>
         )}
-        {!forceExpanded && remainingCount > 0 && !isExpanded && (
-          <button
-            type="button"
-            className="w-full rounded-md px-2 py-1 text-left text-xs font-semibold text-brand-600 hover:bg-brand-50"
-            onClick={(event) => {
-              event.stopPropagation()
-              setIsExpanded(true)
-            }}
-          >
-            +{remainingCount} khác
-          </button>
-        )}
+        <AnimatePresence initial={false}>
+          {!forceExpanded && remainingCount > 0 && !isExpanded && (
+            <FadeIn key="more-tasks" className="w-full">
+              <button
+                type="button"
+                className="w-full rounded-md px-2 py-1 text-left text-xs font-semibold text-brand-600 transition duration-motion-micro ease-motion-standard hover:bg-brand-50"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setIsExpanded(true)
+                }}
+              >
+                +{remainingCount} khác
+              </button>
+            </FadeIn>
+          )}
+        </AnimatePresence>
       </div>
       {showPopup && (
         <div onClick={(event) => event.stopPropagation()}>
@@ -264,62 +272,64 @@ function DayTaskTable({ tasks, colorMode, onTaskClick }) {
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {tasks.map((task) => (
-            <tr
-              key={task.id}
-              className="cursor-pointer transition hover:bg-brand-50/40"
-              onClick={(event) => {
-                event.stopPropagation()
-                onTaskClick(task)
-              }}
-            >
-              <td className="px-4 py-4">
-                <button
-                  type="button"
-                  className="mx-auto block max-w-full truncate text-base font-bold text-slate-800 hover:text-brand-700"
-                  title={task.title}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onTaskClick(task)
-                  }}
-                >
-                  {task.title}
-                </button>
-                {(() => {
-                  const statusPresentation = getTaskStatusPresentation(task)
-
-                  const statusClass =
-                    task.status === 'done' || task.is_overdue
-                      ? statusPresentation.className
-                      : colorMode === 'priority'
-                        ? `priority-${task.priority || 'low'}`
-                        : statusPresentation.className
-                  const statusLabel =
-                    task.status === 'done' || task.is_overdue
-                      ? statusPresentation.label
-                      : colorMode === 'priority'
-                        ? PRIORITY_LABELS[task.priority] || PRIORITY_LABELS.low
-                        : statusPresentation.label
-
-                  return <span className={`mt-1 ${statusClass}`}>{statusLabel}</span>
-                })()}
-              </td>
-              <td className="px-4 py-4 text-sm font-semibold text-slate-700">
-                {task.employee_name}
-              </td>
-              <td className={`px-4 py-4 text-sm font-bold ${getRemainingClass(task)}`}>
-                {getRemainingLabel(task)}
-              </td>
-              <td className="px-4 py-4 text-sm text-slate-600">
-                {formatTaskDate(task.created_at)}
-              </td>
-              <td
-                className={`px-4 py-4 text-sm font-semibold ${task.is_overdue ? 'text-red-600' : 'text-slate-700'}`}
+          <AnimatedTableRows>
+            {tasks.map((task) => (
+              <tr
+                key={task.id}
+                className="cursor-pointer transition duration-motion-micro ease-motion-standard hover:bg-brand-50/40"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onTaskClick(task)
+                }}
               >
-                {formatTaskDate(task.due_date)}
-              </td>
-            </tr>
-          ))}
+                <td className="px-4 py-4">
+                  <button
+                    type="button"
+                    className="mx-auto block max-w-full truncate text-base font-bold text-slate-800 hover:text-brand-700"
+                    title={task.title}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onTaskClick(task)
+                    }}
+                  >
+                    {task.title}
+                  </button>
+                  {(() => {
+                    const statusPresentation = getTaskStatusPresentation(task)
+
+                    const statusClass =
+                      task.status === 'done' || task.is_overdue
+                        ? statusPresentation.className
+                        : colorMode === 'priority'
+                          ? `priority-${task.priority || 'low'}`
+                          : statusPresentation.className
+                    const statusLabel =
+                      task.status === 'done' || task.is_overdue
+                        ? statusPresentation.label
+                        : colorMode === 'priority'
+                          ? PRIORITY_LABELS[task.priority] || PRIORITY_LABELS.low
+                          : statusPresentation.label
+
+                    return <span className={`mt-1 ${statusClass}`}>{statusLabel}</span>
+                  })()}
+                </td>
+                <td className="px-4 py-4 text-sm font-semibold text-slate-700">
+                  {task.employee_name}
+                </td>
+                <td className={`px-4 py-4 text-sm font-bold ${getRemainingClass(task)}`}>
+                  {getRemainingLabel(task)}
+                </td>
+                <td className="px-4 py-4 text-sm text-slate-600">
+                  {formatTaskDate(task.created_at)}
+                </td>
+                <td
+                  className={`px-4 py-4 text-sm font-semibold ${task.is_overdue ? 'text-red-600' : 'text-slate-700'}`}
+                >
+                  {formatTaskDate(task.due_date)}
+                </td>
+              </tr>
+            ))}
+          </AnimatedTableRows>
         </tbody>
       </table>
     </div>

@@ -19,7 +19,7 @@ export async function calculateSha256(file) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-export async function uploadFilesDirectly({ files, context, onProgress }) {
+export async function uploadFilesDirectly({ files, context, onProgress, idempotencyKeys = [] }) {
   const completedSessionIds = []
   try {
     for (const [index, file] of files.entries()) {
@@ -27,13 +27,16 @@ export async function uploadFilesDirectly({ files, context, onProgress }) {
       const checksum = await calculateSha256(file)
       let session
       try {
-        session = await createUploadSession({
-          ...context,
-          file_name: file.name,
-          content_type: file.type,
-          file_size: file.size,
-          checksum,
-        })
+        session = await createUploadSession(
+          {
+            ...context,
+            file_name: file.name,
+            content_type: file.type,
+            file_size: file.size,
+            checksum,
+          },
+          idempotencyKeys[index]?.create,
+        )
       } catch (error) {
         throw new DirectUploadError(error.message, {
           fallbackAllowed: !error.status || error.status >= 500,
@@ -53,7 +56,7 @@ export async function uploadFilesDirectly({ files, context, onProgress }) {
             sessionId: session.id,
           })
         }
-        await completeUploadSession(session.id)
+        await completeUploadSession(session.id, idempotencyKeys[index]?.complete)
       } catch (error) {
         if (error instanceof DirectUploadError) throw error
         throw new DirectUploadError(error.message || 'Không thể xác minh tệp tải lên', {

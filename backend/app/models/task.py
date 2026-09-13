@@ -34,6 +34,14 @@ class DepartmentTaskDirectiveStatus(str, Enum):
     NEEDS_REVISION = "needs_revision"
 
 
+ACTIVE_DIRECTIVE_STATUSES: set[str] = {
+    DepartmentTaskDirectiveStatus.PENDING.value,
+    DepartmentTaskDirectiveStatus.ACKNOWLEDGED.value,
+    DepartmentTaskDirectiveStatus.SUBMITTED.value,
+    DepartmentTaskDirectiveStatus.NEEDS_REVISION.value,
+}
+
+
 class TaskDocument(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
@@ -41,6 +49,8 @@ class TaskDocument(BaseModel):
     title: str
     description: str | None = None
     subtasks: list[str] = Field(default_factory=list)
+    estimated_effort_hours: float | None = Field(default=None, gt=0, le=1000)
+    required_skills: list[str] = Field(default_factory=list)
     employee_id: ObjectId
     department_id: ObjectId
     priority: TaskPriority = TaskPriority.MEDIUM
@@ -56,6 +66,8 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
     subtasks: list[str] = Field(default_factory=list, max_length=20)
+    estimated_effort_hours: float | None = Field(default=None, gt=0, le=1000)
+    required_skills: list[str] = Field(default_factory=list, max_length=30)
     employee_id: str = Field(min_length=1)
     priority: TaskPriority = TaskPriority.MEDIUM
     status: TaskStatus = TaskStatus.TODO
@@ -63,9 +75,13 @@ class TaskCreate(BaseModel):
 
 
 class TaskUpdate(BaseModel):
+    expected_updated_at: datetime | None = Field(default=None, exclude=True)
+    planning_version: str | None = Field(default=None, min_length=1, max_length=128, exclude=True)
     title: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
     subtasks: list[str] | None = Field(default=None, max_length=20)
+    estimated_effort_hours: float | None = Field(default=None, gt=0, le=1000)
+    required_skills: list[str] | None = Field(default=None, max_length=30)
     employee_id: str | None = Field(default=None, min_length=1)
     priority: TaskPriority | None = None
     status: TaskStatus | None = None
@@ -77,6 +93,8 @@ class TaskResponse(BaseModel):
     title: str
     description: str | None = None
     subtasks: list[str]
+    estimated_effort_hours: float | None = None
+    required_skills: list[str] = Field(default_factory=list)
     employee_id: str
     employee_name: str
     employee_code: str
@@ -137,6 +155,8 @@ class DepartmentTaskPortfolioItemResponse(BaseModel):
     completed_at: datetime | None = None
     directive_id: str | None = None
     directive_status: str | None = None
+    # Phân biệt chỉ thị đang hoạt động với lịch sử chỉ thị đã nghiệm thu.
+    has_active_directive: bool = False
 
 
 class DepartmentTaskPortfolioResponse(BaseModel):
@@ -237,6 +257,7 @@ class ReviewDepartmentTaskDirectiveRequest(BaseModel):
 
 
 __all__ = [
+    "ACTIVE_DIRECTIVE_STATUSES",
     "AcknowledgeDepartmentTaskDirectiveRequest",
     "DepartmentTaskDirectiveDocument",
     "DepartmentTaskDirectiveResponse",

@@ -1,7 +1,7 @@
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -12,6 +12,7 @@ from pymongo import MongoClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings
+from app.core.time import business_clock
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,7 +49,7 @@ def request_json(
 def login(base_url: str, username: str, password: str) -> str:
     status, response = request_json(
         base_url,
-        "/api/auth/login",
+        "/api/v1/auth/login",
         method="POST",
         body={"username": username, "password": password},
     )
@@ -56,17 +57,57 @@ def login(base_url: str, username: str, password: str) -> str:
     return response["access_token"]
 
 
+def request_all(base_url: str, path: str, token: str) -> list[dict]:
+    """Read every page from a list endpoint, supporting legacy and page-based contracts."""
+    if path == "/api/v1/employees":
+        items: list[dict] = []
+        page = 1
+        while True:
+            status, payload = request_json(
+                base_url, f"{path}?page={page}&page_size=100", token
+            )
+            assert status == 200 and isinstance(payload, dict), payload
+            items.extend(payload["items"])
+            if not payload["has_next"]:
+                return items
+            page += 1
+
+    page_size = 100
+    offset = 0
+    items: list[dict] = []
+    while True:
+        separator = "&" if "?" in path else "?"
+        status, page = request_json(
+            base_url,
+            f"{path}{separator}offset={offset}&limit={page_size}",
+            token,
+        )
+        assert status == 200 and isinstance(page, list), page
+        items.extend(page)
+        if len(page) < page_size:
+            return items
+        offset += page_size
+
+
 def main(args: argparse.Namespace) -> None:
     leadership_token = login(args.base_url, "demo.leadership", args.password)
     manager_token = login(args.base_url, "demo.manager", args.password)
 
-    status, all_metrics = request_json(args.base_url, "/api/performance", leadership_token)
-    assert status == 200 and len(all_metrics) == 900, len(all_metrics)
-    status, manager_metrics = request_json(args.base_url, "/api/performance", manager_token)
-    assert status == 200 and len(manager_metrics) == 300, len(manager_metrics)
+    employees = request_all(args.base_url, "/api/v1/employees", leadership_token)
+    manager_employees = request_all(args.base_url, "/api/v1/employees", manager_token)
+    today = business_clock.today()
+    start_date = today - timedelta(days=59)
+    metrics_path = (
+        f"/api/v1/performance?start_date={start_date.isoformat()}"
+        f"&end_date={today.isoformat()}"
+    )
+    all_metrics = request_all(args.base_url, metrics_path, leadership_token)
+    manager_metrics = request_all(args.base_url, metrics_path, manager_token)
+    expected_all = len(employees) * 60
+    expected_manager = len(manager_employees) * 60
+    assert len(all_metrics) == expected_all, (len(all_metrics), expected_all)
+    assert len(manager_metrics) == expected_manager, (len(manager_metrics), expected_manager)
 
-    status, employees = request_json(args.base_url, "/api/employees", leadership_token)
-    assert status == 200, employees
     kd_employee = next(
         employee for employee in employees if employee["employee_code"] == "KD-NV-001"
     )

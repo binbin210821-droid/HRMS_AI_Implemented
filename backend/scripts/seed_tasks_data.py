@@ -132,11 +132,10 @@ async def seed(args: argparse.Namespace) -> None:
                 await tasks.update_one(
                     {"seed_key": seed_key},
                     {
-                        "$set": task,
+                        "$set": {**task, "created_by": created_by},
                         "$setOnInsert": {
                             "_id": task_id,
                             "seed_key": seed_key,
-                            "created_by": created_by,
                         },
                     },
                     upsert=True,

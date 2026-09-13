@@ -2,6 +2,11 @@
 
 Hệ thống quản lý hiệu suất nhân viên và cảnh báo quá tải, gồm FastAPI + MongoDB Replica Set ở backend và React/Vite ở frontend.
 
+## CI/CD
+
+Pipeline GitHub Actions, Docker image và hướng dẫn cấu hình staging/production được ghi tại
+[`docs/deployment/ci-cd.md`](docs/deployment/ci-cd.md).
+
 ## Chuẩn hóa frontend UI-only
 
 Đợt chuẩn hóa giao diện hiện tại chỉ thay đổi JSX/class UI, component dùng chung,

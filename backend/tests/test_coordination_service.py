@@ -10,8 +10,11 @@ from app.models.alert import AlertDocument, AlertSeverity, AlertStatus
 from app.models.coordination import (
     AcknowledgeDepartmentAlertDirectiveRequest,
     ApplyCoordinationRequest,
+    CoordinationDirectiveDocument,
+    CoordinationDirectiveStatus,
     CoordinationMode,
     DepartmentAlertDirectiveStatus,
+    FulfillDirectiveRequest,
     IssueDepartmentAlertDirectiveRequest,
     ReviewDepartmentAlertDirectiveRequest,
     SubmitDepartmentAlertDirectiveRequest,
@@ -80,7 +83,7 @@ class FakeRepository:
         self.plan = CoordinationPlanDocument.model_validate(document)
         return self.plan
 
-    async def insert_audit_log(self, document):
+    async def insert_audit_log(self, document, session=None):
         self.audit_logs.append(document)
 
     async def resolve_alert_for_coordination(
@@ -99,6 +102,89 @@ class FakeRepository:
 
     async def find_employee(self, employee_id):
         return make_employee(self.alert.department_id, employee_id)
+
+
+class NameLookupRepository(FakeRepository):
+    async def find_user(self, _user_id):
+        return SimpleNamespace(full_name="Quản lý điều phối")
+
+
+class NameLookupDepartmentRepository:
+    async def find_by_id(self, department_id):
+        return SimpleNamespace(name=f"Phòng {department_id}")
+
+
+class TransactionalFakeClient:
+    def __init__(self, repository):
+        self.repository = repository
+
+    async def start_session(self):
+        return TransactionalFakeSession(self.repository)
+
+
+class TransactionalFakeSession:
+    def __init__(self, repository):
+        self.repository = repository
+        self._snapshot = None
+
+    def start_transaction(self):
+        return self
+
+    async def __aenter__(self):
+        self._snapshot = (
+            self.repository.plan,
+            self.repository.alert,
+            list(self.repository.audit_logs),
+        )
+        return self
+
+    async def __aexit__(self, exc_type, _exc_value, _traceback):
+        if exc_type is not None:
+            self.repository.plan, self.repository.alert, audit_logs = self._snapshot
+            self.repository.audit_logs = audit_logs
+        return False
+
+
+class MidStepFailureRepository(FakeRepository):
+    def __init__(self, alert, candidate):
+        super().__init__(alert, candidate)
+        self.client = TransactionalFakeClient(self)
+        self.fail_once = True
+
+    async def insert_plan(self, document, session=None):
+        return await super().insert_plan(document)
+
+    async def resolve_alert_for_coordination(
+        self, alert_id, resolved_by, resolution_note, resolved_at, session=None
+    ):
+        if self.fail_once:
+            self.fail_once = False
+            return None
+        return await super().resolve_alert_for_coordination(
+            alert_id, resolved_by, resolution_note, resolved_at
+        )
+
+
+class MidStepDirectiveRepository(MidStepFailureRepository):
+    def __init__(self, alert, candidate, directive):
+        super().__init__(alert, candidate)
+        self.directive = directive
+
+    async def find_directive(self, _directive_id):
+        return self.directive
+
+    async def mark_directive_fulfilled(
+        self, _directive_id, plan_id, fulfilled_by, fulfilled_at, session=None
+    ):
+        self.directive = self.directive.model_copy(
+            update={
+                "status": CoordinationDirectiveStatus.FULFILLED,
+                "fulfilled_plan_id": plan_id,
+                "fulfilled_by": fulfilled_by,
+                "fulfilled_at": fulfilled_at,
+            }
+        )
+        return self.directive
 
 
 class FakeDepartmentDirectiveRepository:
@@ -255,6 +341,122 @@ async def test_apply_suggestion_writes_plan_audit_and_event():
 
 
 @pytest.mark.asyncio
+async def test_directive_response_includes_fulfilled_by_name_and_keeps_pending_null():
+    department_id = ObjectId()
+    alert = make_alert(department_id)
+    candidate = WorkloadCandidateResponse(
+        employee_id=str(ObjectId()),
+        employee_code="KD-NV-002",
+        employee_name="Nhân viên nhận việc",
+        tasks_completed=1,
+        quality_score=90,
+    )
+    fulfilled_by = ObjectId()
+    repository = NameLookupRepository(alert, candidate)
+    service = CoordinationService(repository, department_repository=NameLookupDepartmentRepository())
+    base = {
+        "_id": ObjectId(),
+        "alert_id": alert.id,
+        "source_department_id": department_id,
+        "target_department_id": ObjectId(),
+        "tasks_to_transfer": 1,
+        "note": "Điều phối",
+        "issued_by": ObjectId(),
+        "issued_at": datetime(2026, 9, 10, 8, tzinfo=timezone.utc),
+    }
+
+    pending = await service._directive_response(
+        CoordinationDirectiveDocument(**base, status=CoordinationDirectiveStatus.PENDING)
+    )
+    fulfilled = await service._directive_response(
+        CoordinationDirectiveDocument(
+            **base,
+            status=CoordinationDirectiveStatus.FULFILLED,
+            fulfilled_by=fulfilled_by,
+            fulfilled_at=datetime(2026, 9, 10, 10, tzinfo=timezone.utc),
+        )
+    )
+
+    assert pending.fulfilled_by is None
+    assert pending.fulfilled_by_name is None
+    assert fulfilled.fulfilled_by == str(fulfilled_by)
+    assert fulfilled.fulfilled_by_name == "Quản lý điều phối"
+
+
+@pytest.mark.asyncio
+async def test_apply_transaction_rolls_back_mid_step_and_identical_retry_recovers():
+    department_id = ObjectId()
+    alert = make_alert(department_id)
+    target_id = ObjectId()
+    candidate = WorkloadCandidateResponse(
+        employee_id=str(target_id),
+        employee_code="KD-NV-002",
+        employee_name="Nhân viên nhận việc",
+        tasks_completed=1,
+        quality_score=90,
+    )
+    repository = MidStepFailureRepository(alert, candidate)
+    service = CoordinationService(repository)
+    request = ApplyCoordinationRequest()
+
+    with pytest.raises(HTTPException) as first_error:
+        await service.apply(str(alert.id), department_id, str(ObjectId()), request)
+    assert first_error.value.status_code == 503
+    assert repository.plan is None
+    assert repository.alert.status == AlertStatus.OPEN
+    assert repository.audit_logs == []
+
+    result = await service.apply(str(alert.id), department_id, str(ObjectId()), request)
+    assert result.target_employee_id == str(target_id)
+    assert repository.alert.status == AlertStatus.RESOLVED
+
+
+@pytest.mark.asyncio
+async def test_fulfill_transaction_rolls_back_mid_step_and_identical_retry_recovers():
+    source_department_id = ObjectId()
+    target_department_id = ObjectId()
+    alert = make_alert(source_department_id)
+    target_id = ObjectId()
+    candidate = WorkloadCandidateResponse(
+        employee_id=str(target_id),
+        employee_code="CSKH-NV-002",
+        employee_name="Nhân viên tiếp nhận",
+        tasks_completed=1,
+        quality_score=90,
+    )
+    directive = CoordinationDirectiveDocument(
+        _id=ObjectId(),
+        alert_id=alert.id,
+        source_department_id=source_department_id,
+        target_department_id=target_department_id,
+        tasks_to_transfer=2,
+        note="Xử lý cảnh báo liên phòng ban",
+        status=CoordinationDirectiveStatus.PENDING,
+        issued_by=ObjectId(),
+        issued_at=datetime.now(timezone.utc),
+    )
+    repository = MidStepDirectiveRepository(alert, candidate, directive)
+    service = CoordinationService(repository)
+    request = FulfillDirectiveRequest(target_employee_id=str(target_id), tasks_to_transfer=1)
+
+    with pytest.raises(HTTPException) as first_error:
+        await service.fulfill_directive(
+            str(directive.id), target_department_id, str(ObjectId()), request
+        )
+    assert first_error.value.status_code == 503
+    assert repository.plan is None
+    assert repository.alert.status == AlertStatus.OPEN
+    assert repository.directive.status == CoordinationDirectiveStatus.PENDING
+
+    result = await service.fulfill_directive(
+        str(directive.id), target_department_id, str(ObjectId()), request
+    )
+    assert result.target_employee_id == str(target_id)
+    assert repository.alert.status == AlertStatus.RESOLVED
+    assert repository.directive.status == CoordinationDirectiveStatus.FULFILLED
+
+
+@pytest.mark.asyncio
 async def test_manager_cannot_apply_coordination_outside_department():
     alert_department = ObjectId()
     alert = make_alert(alert_department)
@@ -272,6 +474,26 @@ async def test_manager_cannot_apply_coordination_outside_department():
             ObjectId(),
             str(ObjectId()),
             ApplyCoordinationRequest(),
+        )
+
+    assert forbidden.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_manager_cannot_request_open_alert_outside_department():
+    alert_department = ObjectId()
+    alert = make_alert(alert_department)
+    candidate = WorkloadCandidateResponse(
+        employee_id=str(ObjectId()),
+        employee_code="KD-NV-002",
+        employee_name="Nhân viên nhận việc",
+        tasks_completed=1,
+        quality_score=90,
+    )
+
+    with pytest.raises(HTTPException) as forbidden:
+        await CoordinationService(FakeRepository(alert, candidate)).get_open_alert(
+            str(alert.id), ObjectId()
         )
 
     assert forbidden.value.status_code == 403
@@ -434,7 +656,7 @@ async def test_alert_directive_revision_and_acceptance_keep_alert_state_unchange
     created = await service.issue_department_directive(
         str(department_id), str(ObjectId()), IssueDepartmentAlertDirectiveRequest()
     )
-    await service.acknowledge_department_directive(
+    acknowledged = await service.acknowledge_department_directive(
         created.id,
         department_id,
         str(repository.manager.id),
@@ -470,4 +692,5 @@ async def test_alert_directive_revision_and_acceptance_keep_alert_state_unchange
     assert submitted.progress_percent == 100
     assert revised.status.value == "needs_revision"
     assert accepted.status.value == "accepted"
+    assert accepted.acknowledged_at == acknowledged.acknowledged_at
     assert repository.alerts[0].status == AlertStatus.RESOLVED

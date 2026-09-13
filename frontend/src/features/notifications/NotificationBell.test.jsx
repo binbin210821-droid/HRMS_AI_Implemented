@@ -1,9 +1,9 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import NotificationBell from './NotificationBell.jsx'
 import { listAlerts } from '../alerts/alertsApi.js'
-import { listDepartmentDirectives } from '../coordination/coordinationApi.js'
+import { listDepartmentDirectives, listDirectives } from '../coordination/coordinationApi.js'
 import { listDepartments } from '../departments/departmentsApi.js'
 import { listDepartmentTaskDirectives, listTasks } from '../tasks/tasksApi.js'
 import { useAuthStore } from '../../stores/authStore.js'
@@ -20,6 +20,7 @@ vi.mock('../alerts/alertsApi.js', () => ({
 
 vi.mock('../coordination/coordinationApi.js', () => ({
   listDepartmentDirectives: vi.fn(),
+  listDirectives: vi.fn(),
 }))
 
 vi.mock('../departments/departmentsApi.js', () => ({
@@ -54,6 +55,7 @@ describe('NotificationBell', () => {
     ])
     listTasks.mockResolvedValue([])
     listDepartmentTaskDirectives.mockResolvedValue([])
+    listDirectives.mockResolvedValue([])
     listDepartments.mockResolvedValue([{ id: 'department-1', name: 'Phòng Kinh doanh' }])
     listDepartmentDirectives.mockResolvedValue([])
   })
@@ -63,10 +65,19 @@ describe('NotificationBell', () => {
 
     await waitFor(() => expect(listAlerts).toHaveBeenCalledWith('open', 'all'))
     expect(listTasks).toHaveBeenCalledWith({ overdueOnly: true })
-    expect(screen.getByRole('button', { name: 'Thông báo, 1 cần theo dõi' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Thông báo, 1 cần theo dõi' })).toBeInTheDocument(),
+    )
 
     fireEvent.click(screen.getByRole('button', { name: 'Thông báo, 1 cần theo dõi' }))
-    expect(screen.getByRole('heading', { name: 'Yêu cầu xử lý cảnh báo' })).toBeInTheDocument()
+    const alertSection = screen
+      .getByRole('heading', { name: 'Yêu cầu xử lý cảnh báo' })
+      .closest('section')
+    const taskSection = screen
+      .getByRole('heading', { name: 'Giao việc quá hạn' })
+      .closest('section')
+    expect(alertSection).toHaveClass('border-amber-200', 'bg-amber-50')
+    expect(taskSection).toHaveClass('border-rose-200', 'bg-rose-50')
     expect(screen.getByText('Dấu hiệu sớm: 1')).toBeInTheDocument()
     expect(screen.getByText('Quá tải: 0')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Giao việc quá hạn' })).toBeInTheDocument()
@@ -162,7 +173,7 @@ describe('NotificationBell', () => {
     expect(screen.queryByText('Nguyễn Văn B')).not.toBeInTheDocument()
   })
 
-  it('ẩn cả cảnh báo và công việc quá hạn đã nằm trong chỉ thị của Leadership', async () => {
+  it('vẫn hiển thị công việc quá hạn dù đã nằm trong chỉ thị của Leadership', async () => {
     useAuthStore.setState({ role: 'leadership' })
     listTasks.mockResolvedValue([
       {
@@ -179,13 +190,13 @@ describe('NotificationBell', () => {
 
     render(<NotificationBell />)
 
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Thông báo' })).toBeInTheDocument(),
+    const notificationButton = await waitFor(() =>
+      screen.getByRole('button', { name: 'Thông báo, 1 cần theo dõi' }),
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Thông báo' }))
+    fireEvent.click(notificationButton)
 
-    expect(screen.getByText('Bạn không có thông báo mới.')).toBeInTheDocument()
-    expect(screen.queryByText('Công việc đã được chỉ thị')).not.toBeInTheDocument()
+    expect(screen.getByText('Nguyễn Văn B')).toBeInTheDocument()
+    expect(screen.getByText('1 việc')).toBeInTheDocument()
   })
 
   it('filters leadership overdue tasks by department', async () => {
@@ -215,7 +226,7 @@ describe('NotificationBell', () => {
     )
   })
 
-  it('shows a 10-second reminder every 15 seconds when notifications need attention', async () => {
+  it('shows one 10-second reminder after 15 seconds when notifications need attention', async () => {
     vi.useFakeTimers()
     listTasks.mockResolvedValue([
       {
@@ -235,12 +246,58 @@ describe('NotificationBell', () => {
       vi.advanceTimersByTime(15000)
     })
     expect(screen.getByRole('status')).toHaveTextContent(
-      'Có 1 yêu cầu xử lý cảnh báo và 1 giao việc quá hạn cần xử lý.',
+      'Có 1 yêu cầu xử lý cảnh báo, 1 giao việc quá hạn và 0 chỉ thị đang theo dõi.',
     )
 
     act(() => {
       vi.advanceTimersByTime(10000)
     })
-    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    vi.useRealTimers()
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument())
+  })
+
+  it('đếm chỉ thị đang theo dõi và mở đúng trung tâm chỉ thị cho Manager', async () => {
+    useAuthStore.setState({ role: 'manager' })
+    listAlerts.mockResolvedValue([])
+    listTasks.mockResolvedValue([])
+    listDepartmentDirectives.mockResolvedValue([
+      { id: 'alert-directive-1', status: 'pending' },
+      { id: 'alert-directive-2', status: 'accepted' },
+    ])
+    listDepartmentTaskDirectives.mockResolvedValue([
+      { id: 'task-directive-1', status: 'needs_revision' },
+    ])
+    listDirectives.mockResolvedValue([{ id: 'coordination-1', status: 'fulfilled' }])
+
+    render(<NotificationBell />)
+
+    const notificationButton = await waitFor(() =>
+      screen.getByRole('button', { name: 'Thông báo, 2 cần theo dõi' }),
+    )
+    fireEvent.click(notificationButton)
+
+    const section = screen
+      .getByRole('heading', { name: 'Chỉ thị đang theo dõi' })
+      .closest('section')
+    expect(section).not.toBeNull()
+    expect(section).toHaveClass('border-blue-200', 'bg-blue-50')
+    expect(within(section).getByText('2')).toBeInTheDocument()
+    expect(
+      within(section).getByRole('button', { name: 'Mở trung tâm chỉ thị: Yêu cầu xử lý cảnh báo' }),
+    ).toBeInTheDocument()
+    expect(
+      within(section).getByRole('button', { name: 'Mở trung tâm chỉ thị: Giao việc quá hạn' }),
+    ).toBeInTheDocument()
+    expect(within(section).queryByText('Đã nghiệm thu xử lý cảnh báo')).not.toBeInTheDocument()
+
+    fireEvent.click(
+      within(section).getByRole('button', {
+        name: 'Mở trung tâm chỉ thị: Yêu cầu xử lý cảnh báo',
+      }),
+    )
+    expect(navigateMock).toHaveBeenCalledWith('/manager/directives')
   })
 })

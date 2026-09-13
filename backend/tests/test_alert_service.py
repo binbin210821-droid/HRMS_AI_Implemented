@@ -37,10 +37,13 @@ class FakeAlertRepository:
     async def find_by_id(self, _alert_id: ObjectId) -> AlertDocument | None:
         return self.alert
 
-    async def update(self, _alert_id: ObjectId, values: dict) -> AlertDocument:
+    async def resolve_if_open(self, _alert_id: ObjectId, values: dict) -> AlertDocument:
         self.updated = values
         self.alert = self.alert.model_copy(update=values)
         return self.alert
+
+    async def update(self, _alert_id: ObjectId, values: dict) -> AlertDocument:
+        return await self.resolve_if_open(_alert_id, values)
 
 
 class UnusedRepository:
@@ -80,3 +83,24 @@ async def test_manager_cannot_resolve_alert_outside_department() -> None:
         )
 
     assert forbidden.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_resolve_returns_committed_state_when_another_request_wins_race() -> None:
+    class RaceRepository(FakeAlertRepository):
+        async def resolve_if_open(self, _alert_id: ObjectId, values: dict):
+            self.alert = self.alert.model_copy(update=values)
+            return None
+
+    department_id = ObjectId()
+    repository = RaceRepository(make_alert(department_id))
+    service = EarlyWarningService(repository, UnusedRepository(), UnusedRepository())
+
+    resolved = await service.resolve(
+        str(repository.alert.id),
+        department_id,
+        str(ObjectId()),
+        AlertResolveRequest(resolution_note="Đã xử lý ở request đồng thời"),
+    )
+
+    assert resolved.status == AlertStatus.RESOLVED

@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
-import {
-  listDepartmentDirectives,
-  listDirectives,
-} from '../coordination/coordinationApi.js'
+import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { listDepartmentDirectives, listDirectives } from '../coordination/coordinationApi.js'
 import {
   DIRECTIVE_SOURCE_LABELS,
   getDirectiveStatusLabel,
@@ -55,12 +52,20 @@ function DirectiveSummaryCard({ role }) {
     void loadDirectives()
   }, [loadDirectives])
 
-  useRealtimeUpdates('department_directives', () => {
-    void loadDirectives()
-  })
-  useRealtimeUpdates('task_directives', () => {
-    void loadDirectives()
-  })
+  useRealtimeUpdates(
+    'department_directives',
+    () => {
+      void loadDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
+  useRealtimeUpdates(
+    'task_directives',
+    () => {
+      void loadDirectives()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
 
   const sourceCounts = useMemo(
     () =>
@@ -84,7 +89,7 @@ function DirectiveSummaryCard({ role }) {
     <section className="mt-6 rounded-2xl bg-sky-50/70 p-5 ring-1 ring-sky-100 sm:p-6">
       <button
         type="button"
-        className="w-full text-left transition hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2"
+        className="w-full text-left transition duration-motion-standard ease-motion-standard hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2"
         aria-label="Mở trang yêu cầu và điều phối"
         onClick={() => navigate(directivesPath)}
       >
@@ -110,7 +115,9 @@ function DirectiveSummaryCard({ role }) {
           </div>
         </div>
 
-        {error && <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
+        {error && (
+          <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+        )}
 
         <div className="mt-4 grid gap-2 sm:grid-cols-3">
           {sourceCounts.map(({ source, label, count, statusCounts }) => (

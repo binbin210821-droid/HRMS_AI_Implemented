@@ -1,59 +1,76 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { act } from '@testing-library/react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { TOKEN_KEY, useAuthStore } from './authStore.js'
+import { useAuthStore } from './authStore.js'
 
-function tokenFor(claims) {
-  const encode = (value) =>
-    btoa(JSON.stringify(value)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-  return `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode(claims)}.signature`
+const manager = {
+  user_id: 'user-1',
+  username: 'demo.manager',
+  full_name: 'Quản lý Demo',
+  role: 'manager',
+  department_id: 'dept-1',
 }
 
 describe('authStore', () => {
   beforeEach(() => {
-    useAuthStore.getState().logout()
-    localStorage.clear()
+    vi.restoreAllMocks()
+    useAuthStore.getState().clearSession()
   })
 
-  it('stores a valid JWT session and claims', () => {
-    const token = tokenFor({ sub: 'user-1', role: 'manager', department_id: 'dept-1' })
-
-    useAuthStore.getState().login({ access_token: token })
+  it('stores server-provided user data without persisting an access token', () => {
+    useAuthStore.getState().setUser(manager)
 
     expect(useAuthStore.getState()).toMatchObject({
-      token,
+      currentUser: manager,
+      claims: manager,
       role: 'manager',
       isAuthenticated: true,
-      claims: { sub: 'user-1', department_id: 'dept-1' },
+      isInitializing: false,
     })
-    expect(localStorage.getItem(TOKEN_KEY)).toBe(token)
+    expect(localStorage.length).toBe(0)
   })
 
-  it('rejects expired or malformed JWT sessions', () => {
-    useAuthStore.getState().login({
-      access_token: tokenFor({
-        sub: 'user-1',
-        role: 'manager',
-        exp: Math.floor(Date.now() / 1000) - 1,
-      }),
-    })
-    expect(useAuthStore.getState().isAuthenticated).toBe(false)
+  it('restores a session from /me through the HttpOnly cookie', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => manager }))
 
-    useAuthStore.getState().login({ access_token: 'not-a-jwt' })
-    expect(useAuthStore.getState().isAuthenticated).toBe(false)
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
+    await act(async () => {
+      await useAuthStore.getState().initializeSession()
+    })
+
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/v1/auth/me',
+      expect.objectContaining({ credentials: 'include' }),
+    )
+    expect(useAuthStore.getState()).toMatchObject({ role: 'manager', isAuthenticated: true })
   })
 
-  it('clears local session on logout', () => {
-    const token = tokenFor({ sub: 'user-1', role: 'leadership' })
-    useAuthStore.getState().login({ access_token: token })
-    useAuthStore.getState().logout()
+  it('clears the session when /me is unauthorized', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }))
+
+    await act(async () => {
+      await useAuthStore.getState().initializeSession()
+    })
 
     expect(useAuthStore.getState()).toMatchObject({
-      token: null,
+      currentUser: null,
       role: null,
-      claims: null,
       isAuthenticated: false,
+      isInitializing: false,
     })
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
+  })
+
+  it('clears the local session immediately and calls logout with credentials', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
+    useAuthStore.getState().setUser(manager)
+
+    await act(async () => {
+      await useAuthStore.getState().logout()
+    })
+
+    expect(useAuthStore.getState().isAuthenticated).toBe(false)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/v1/auth/logout',
+      expect.objectContaining({ method: 'POST', credentials: 'include' }),
+    )
   })
 })

@@ -29,7 +29,11 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
+    access_token: str = Field(
+        ...,
+        description="Deprecated: chỉ giữ tạm cho client tương thích Bearer",
+        json_schema_extra={"deprecated": True},
+    )
     token_type: str = "bearer"
 
 

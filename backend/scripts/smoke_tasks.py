@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
 
 def login(base_url: str, username: str, password: str) -> str:
     request = Request(
-        f"{base_url}/api/auth/login",
+        f"{base_url}/api/v1/auth/login",
         data=json.dumps({"username": username, "password": password}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -33,11 +33,11 @@ def login(base_url: str, username: str, password: str) -> str:
 
 def get_tasks(base_url: str, token: str) -> list[dict]:
     request = Request(
-        f"{base_url}/api/tasks",
+        f"{base_url}/api/v1/tasks",
         headers={"Authorization": f"Bearer {token}"},
     )
     with urlopen(request, timeout=5) as response:
-        return json.load(response)
+        return json.load(response)["items"]
 
 
 def run_smoke(args: argparse.Namespace) -> None:

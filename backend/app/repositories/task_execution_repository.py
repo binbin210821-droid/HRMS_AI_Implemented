@@ -115,7 +115,7 @@ class TaskExecutionRepository:
         return TaskExecutionReportDocument.model_validate(document) if document else None
 
     async def bulk_update_manager_reviews(
-        self, entries: list[dict[str, Any]]
+        self, entries: list[dict[str, Any]], session: Any | None = None
     ) -> dict[ObjectId, TaskExecutionReportDocument]:
         if not entries:
             return {}
@@ -151,9 +151,13 @@ class TaskExecutionRepository:
             if report is None:
                 update["$setOnInsert"] = set_on_insert
             operations.append(UpdateOne(query, update, upsert=report is None))
-        await self.collection.bulk_write(operations, ordered=True)
+        write_options: dict[str, Any] = {"ordered": True}
+        if session is not None:
+            write_options["session"] = session
+        await self.collection.bulk_write(operations, **write_options)
+        find_options = {"session": session} if session is not None else {}
         documents = await self.collection.find(
-            {"task_id": {"$in": task_ids}, "work_date": work_date}
+            {"task_id": {"$in": task_ids}, "work_date": work_date}, **find_options
         ).to_list(None)
         reports = [TaskExecutionReportDocument.model_validate(document) for document in documents]
         return {report.task_id: report for report in reports}

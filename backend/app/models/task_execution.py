@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 
 from bson import ObjectId
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TaskExecutionOutcome(str, Enum):
@@ -71,6 +71,26 @@ class DailyPerformanceReviewCreate(BaseModel):
     items: list[DailyPerformanceReviewItem] = Field(min_length=1)
 
 
+class DailyPerformanceReviewUpdateV1(BaseModel):
+    """Request contract for the resource-shaped v1 PATCH endpoint.
+
+    ``reason`` explains the whole update operation.  Per-task
+    ``change_reason`` remains available for callers that need a more specific
+    explanation and takes precedence in the service layer.
+    """
+
+    items: list[DailyPerformanceReviewItem] = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Lý do thay đổi điểm không được để trống")
+        return normalized
+
+
 class DailyReviewEmployeeResponse(BaseModel):
     id: str
     full_name: str
@@ -135,6 +155,7 @@ __all__ = [
     "DailyPerformanceReviewItem",
     "DailyPerformanceReviewResponse",
     "DailyPerformanceReviewSummary",
+    "DailyPerformanceReviewUpdateV1",
     "DailyReviewAttachmentMetadata",
     "DailyReviewAttachmentResponse",
     "DailyReviewDownloadUrlResponse",

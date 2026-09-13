@@ -35,4 +35,9 @@ def test_leadership_cannot_call_personal_task_creation_api() -> None:
         app.dependency_overrides.clear()
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Bạn không có quyền thực hiện chức năng này"
+    assert response.json() == {
+        "code": "forbidden",
+        "message": "Bạn không có quyền thực hiện chức năng này",
+        "details": None,
+        "request_id": response.json()["request_id"],
+    }

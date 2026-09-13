@@ -1,3 +1,8 @@
 export { default as CounterNumber } from './CounterNumber.jsx'
 export { default as FadeIn } from './FadeIn.jsx'
+export { default as AiLoadingIndicator } from './AiLoadingIndicator.jsx'
+export { default as AnimatedTableRows } from './AnimatedTableRows.jsx'
+export { default as PageTransition } from './PageTransition.jsx'
 export { default as SlideIn } from './SlideIn.jsx'
+export { default as StaggerList } from './StaggerList.jsx'
+export { MOTION, MOTION_EASE, motionTransition } from './motion.js'

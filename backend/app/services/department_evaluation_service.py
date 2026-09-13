@@ -105,7 +105,7 @@ class DepartmentEvaluationService:
     ) -> DepartmentWeeklyReviewResponse:
         department_object_id = parse_object_id(department_id, "Mã phòng ban")
         department, manager = await self._department_context(department_object_id)
-        week_end, cutoff = self._validate_week(week_start)
+        week_start, week_end, cutoff = self._validate_week(week_start)
         now = self._now()
         existing = await self.repository.find_evaluation(department_object_id, week_start)
         evidence = (
@@ -221,10 +221,10 @@ class DepartmentEvaluationService:
         await self.repository.ensure_indexes()
         department_id = parse_object_id(payload.department_id, "Mã phòng ban")
         department, manager = await self._department_context(department_id)
-        week_end, cutoff = self._validate_week(payload.week_start)
+        week_start, week_end, cutoff = self._validate_week(payload.week_start)
         now = self._now()
         self._require_available(now, cutoff)
-        if await self.repository.find_evaluation(department_id, payload.week_start):
+        if await self.repository.find_evaluation(department_id, week_start):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Phòng ban đã được đánh giá trong tuần này",
@@ -244,14 +244,14 @@ class DepartmentEvaluationService:
                     detail="Tải trực tiếp chưa được cấu hình",
                 )
             attachment_values = await self.upload_service.resolve_for_department_evaluation(
-                direct_session_ids, evaluated_by, department_id, payload.week_start
+                direct_session_ids, evaluated_by, department_id, week_start
             )
             attachments = [DepartmentEvaluationAttachment.model_validate(item) for item in attachment_values]
         else:
-            attachments = await self._upload_files(department_id, payload.week_start, uploads)
+            attachments = await self._upload_files(department_id, week_start, uploads)
         try:
             evidence = await self._build_evidence(
-                department_id, payload.week_start, week_end, cutoff
+                department_id, week_start, week_end, cutoff
             )
             document = {
                 "_id": ObjectId(),
@@ -260,7 +260,7 @@ class DepartmentEvaluationService:
                 "department_code": department.code,
                 "manager_id": manager.id if manager else None,
                 "manager_name": manager.full_name if manager else None,
-                "week_start": payload.week_start,
+                "week_start": week_start,
                 "week_end": week_end,
                 "evidence_cutoff_at": cutoff,
                 "directive_execution_score": payload.directive_execution_score,
@@ -293,7 +293,7 @@ class DepartmentEvaluationService:
                 await self._delete_files(attachments)
             raise
         if direct_session_ids and self.upload_service:
-            await self.upload_service.commit(direct_session_ids)
+            await self.upload_service.commit(direct_session_ids, evaluated_by)
         await self.repository.insert_audit_log(
             {
                 "action": "department_weekly_evaluation_created",
@@ -376,7 +376,7 @@ class DepartmentEvaluationService:
                 detail="Không tìm thấy đánh giá phòng ban",
             )
         if direct_session_ids and self.upload_service:
-            await self.upload_service.commit(direct_session_ids)
+            await self.upload_service.commit(direct_session_ids, evaluated_by)
         if uploads or direct_session_ids:
             await self._delete_files(existing.attachments)
         await self.repository.insert_audit_log(
@@ -401,12 +401,13 @@ class DepartmentEvaluationService:
             )
         return department, await self.repository.find_active_manager(department_id)
 
-    def _validate_week(self, week_start: Date) -> tuple[Date, datetime]:
-        if week_start.weekday() != 0:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Ngày bắt đầu kỳ đánh giá phải là thứ Hai",
-            )
+    @staticmethod
+    def _normalize_week_start(week_start: Date) -> Date:
+        """Accept any date in a work week and use its Monday as the stable key."""
+        return week_start - timedelta(days=week_start.weekday())
+
+    def _validate_week(self, week_start: Date) -> tuple[Date, Date, datetime]:
+        week_start = self._normalize_week_start(week_start)
         current_monday = self._now().astimezone(self.business_timezone).date()
         current_monday -= timedelta(days=current_monday.weekday())
         if week_start > current_monday:
@@ -420,7 +421,7 @@ class DepartmentEvaluationService:
             time(hour=self.settings.weekly_evaluation_cutoff_hour),
             tzinfo=self.business_timezone,
         )
-        return week_end, cutoff_local.astimezone(timezone.utc)
+        return week_start, week_end, cutoff_local.astimezone(timezone.utc)
 
     @staticmethod
     def _require_available(now: datetime, cutoff: datetime) -> None:

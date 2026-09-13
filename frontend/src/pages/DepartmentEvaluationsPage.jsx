@@ -1,10 +1,23 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import Modal from '../components/Modal.jsx'
-import { FadeIn } from '../components/animations/index.js'
+import { AnimatedTableRows, FadeIn } from '../components/animations/index.js'
+import { useActionFeedback } from '../components/feedback/index.js'
 import AttachmentLink from '../components/attachments/AttachmentLink.jsx'
 import { DirectUploadError, uploadFilesDirectly } from '../components/attachments/UploadManager.js'
 import MainLayout from '../components/layout/MainLayout.jsx'
+import {
+  Button,
+  Dialog,
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Textarea,
+} from '../components/ui/index.js'
 import {
   createDepartmentEvaluation,
   getDepartmentEvaluation,
@@ -14,7 +27,8 @@ import {
   updateDepartmentEvaluation,
 } from '../features/departmentEvaluations/departmentEvaluationsApi.js'
 import { listDepartments } from '../features/departments/departmentsApi.js'
-import { useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../hooks/useRealtimeUpdates.js'
+import { generateIdempotencyKey } from '../utils/idempotency.js'
 
 const STABILITY_LABELS = {
   improving: 'Đang cải thiện',
@@ -94,6 +108,7 @@ function formatDelay(hours) {
 }
 
 function DepartmentEvaluationsPage() {
+  const { confirmAction, notifyActionSuccess, notifyActionError } = useActionFeedback()
   const [departments, setDepartments] = useState([])
   const [history, setHistory] = useState([])
   const [historyPage, setHistoryPage] = useState(1)
@@ -115,6 +130,8 @@ function DepartmentEvaluationsPage() {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const idempotencyKeyRef = useRef(null)
+  const uploadIdempotencyKeysRef = useRef(null)
 
   const loadBaseData = useCallback(async () => {
     setIsLoading(true)
@@ -183,6 +200,8 @@ function DepartmentEvaluationsPage() {
         setAssessmentNote('')
       }
       setFiles([])
+      idempotencyKeyRef.current = null
+      uploadIdempotencyKeysRef.current = null
       setError('')
     } catch (requestError) {
       setReview(null)
@@ -200,15 +219,29 @@ function DepartmentEvaluationsPage() {
     void loadReview()
   }, [loadReview])
 
-  useRealtimeUpdates('performance_metrics', () => void loadReview())
-  useRealtimeUpdates('tasks', () => void loadReview())
-  useRealtimeUpdates('alerts', () => void loadReview())
-  useRealtimeUpdates('task_directives', () => void loadReview())
-  useRealtimeUpdates('department_directives', () => void loadReview())
-  useRealtimeUpdates('department_evaluations', () => {
-    void loadReview()
-    void loadBaseData()
+  useRealtimeUpdates('performance_metrics', () => void loadReview(), {
+    coalesceDelay: REALTIME_COALESCE_DELAY,
   })
+  useRealtimeUpdates('tasks', () => void loadReview(), {
+    coalesceDelay: REALTIME_COALESCE_DELAY,
+  })
+  useRealtimeUpdates('alerts', () => void loadReview(), {
+    coalesceDelay: REALTIME_COALESCE_DELAY,
+  })
+  useRealtimeUpdates('task_directives', () => void loadReview(), {
+    coalesceDelay: REALTIME_COALESCE_DELAY,
+  })
+  useRealtimeUpdates('department_directives', () => void loadReview(), {
+    coalesceDelay: REALTIME_COALESCE_DELAY,
+  })
+  useRealtimeUpdates(
+    'department_evaluations',
+    () => {
+      void loadReview()
+      void loadBaseData()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
 
   const overallScore = useMemo(
     () =>
@@ -229,9 +262,33 @@ function DepartmentEvaluationsPage() {
       setError('Vui lòng đính kèm ít nhất một tài liệu định hướng tuần mới.')
       return
     }
+    const department = departments.find((item) => item.id === departmentId)
+    const confirmed = await confirmAction({
+      title: existing ? 'Xác nhận thay đổi đánh giá phòng ban' : 'Xác nhận lưu đánh giá phòng ban',
+      description: existing
+        ? 'Kết quả đánh giá sẽ được cập nhật theo thông tin bạn đã chỉnh sửa.'
+        : 'Đánh giá và định hướng tuần sẽ được ghi nhận cho phòng ban này.',
+      details: [
+        `Phòng ban: ${department?.name || 'Chưa xác định'}`,
+        `Tuần đánh giá: ${formatDate(weekStart)}`,
+        `Điểm thực hiện chỉ thị: ${scores.directive}/100`,
+        `Điểm ổn định: ${scores.stability}/100`,
+        `Khả năng hoàn thành đúng hạn: ${scores.timeliness}/100`,
+        `Tài liệu đính kèm: ${files.length}`,
+      ],
+      confirmLabel: existing ? 'Xác nhận thay đổi' : 'Xác nhận lưu đánh giá',
+    })
+    if (!confirmed) return
     setIsSaving(true)
     setError('')
     setSuccess('')
+    idempotencyKeyRef.current ??= generateIdempotencyKey()
+    if (files.length && !uploadIdempotencyKeysRef.current) {
+      uploadIdempotencyKeysRef.current = files.map(() => ({
+        create: generateIdempotencyKey(),
+        complete: generateIdempotencyKey(),
+      }))
+    }
     let submitFiles = files
     let attachmentSessionIds = []
     try {
@@ -243,6 +300,7 @@ function DepartmentEvaluationsPage() {
             department_id: departmentId,
             week_start: review.week_start,
           },
+          idempotencyKeys: uploadIdempotencyKeysRef.current || [],
           onProgress: setUploadProgress,
         })
         submitFiles = []
@@ -250,11 +308,17 @@ function DepartmentEvaluationsPage() {
     } catch (requestError) {
       if (!(requestError instanceof DirectUploadError) || !requestError.fallbackAllowed) {
         setError(requestError.message || 'Không thể tải tài liệu định hướng.')
+        notifyActionError({
+          title: 'Chưa lưu đánh giá phòng ban',
+          message: requestError.message || 'Không thể tải tài liệu định hướng.',
+        })
         setIsSaving(false)
         setUploadProgress(null)
         return
       }
-      setSuccess('Tải trực tiếp chưa sẵn sàng, đang chuyển sang phương thức tải tệp thông thường...')
+      setSuccess(
+        'Tải trực tiếp chưa sẵn sàng, đang chuyển sang phương thức tải tệp thông thường...',
+      )
       attachmentSessionIds = []
       submitFiles = files
     }
@@ -267,19 +331,34 @@ function DepartmentEvaluationsPage() {
     }
     try {
       if (existing) {
-        await updateDepartmentEvaluation(existing.id, payload, submitFiles)
+        await updateDepartmentEvaluation(
+          existing.id,
+          payload,
+          submitFiles,
+          idempotencyKeyRef.current,
+        )
         setSuccess('Đã cập nhật đánh giá phòng ban.')
         setIsEditModalOpen(false)
       } else {
         await createDepartmentEvaluation(
           { ...payload, department_id: departmentId, week_start: weekStart },
           submitFiles,
+          idempotencyKeyRef.current,
         )
         setSuccess('Đã lưu đánh giá và định hướng tuần tiếp theo.')
       }
       await Promise.all([loadReview(), loadBaseData()])
+      idempotencyKeyRef.current = null
+      uploadIdempotencyKeysRef.current = null
+      notifyActionSuccess({
+        title: existing ? 'Đã thay đổi đánh giá phòng ban' : 'Đã lưu đánh giá phòng ban',
+        message: `Đánh giá phòng ban ${department?.name || 'đã chọn'} cho tuần ${formatDate(weekStart)} đã được ghi nhận.`,
+        details: [`Điểm tổng hợp: ${overallScore}/100`],
+      })
     } catch (requestError) {
-      setError(requestError.message || 'Không thể lưu đánh giá phòng ban.')
+      const message = requestError.message || 'Không thể lưu đánh giá phòng ban.'
+      setError(message)
+      notifyActionError({ title: 'Chưa lưu đánh giá phòng ban', message })
     } finally {
       setIsSaving(false)
       setUploadProgress(null)
@@ -303,10 +382,26 @@ function DepartmentEvaluationsPage() {
     ),
   )
 
+  function updateEvaluationScores(nextScores) {
+    idempotencyKeyRef.current = null
+    setScores(nextScores)
+  }
+
+  function updateAssessmentNote(nextNote) {
+    idempotencyKeyRef.current = null
+    setAssessmentNote(nextNote)
+  }
+
+  function updateEvaluationFiles(nextFiles) {
+    idempotencyKeyRef.current = null
+    uploadIdempotencyKeysRef.current = null
+    setFiles(nextFiles)
+  }
+
   return (
     <MainLayout>
       <FadeIn className="mx-auto max-w-7xl">
-        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <p className="!text-caption !font-semibold !uppercase !tracking-wider !text-brand-600">
@@ -314,8 +409,8 @@ function DepartmentEvaluationsPage() {
               </p>
               <h1 className="mt-2 text-slate-900">Đánh giá phòng ban theo tuần</h1>
               <p className="mt-2 max-w-3xl text-ink-600">
-                Đánh giá dựa trên kết quả chỉ thị, độ ổn định và khả năng hoàn thành đúng hạn của
-                phòng ban; không sử dụng dữ liệu nhận diện nhân viên.
+                Đánh giá dựa trên kết quả thực hiện, độ ổn định và khả năng hoàn thành đúng hạn của
+                phòng ban.
               </p>
             </div>
             {review && (
@@ -334,10 +429,14 @@ function DepartmentEvaluationsPage() {
           <div className="mt-6 grid gap-4 rounded-2xl bg-slate-50 p-4 md:grid-cols-2">
             <label className="text-sm font-semibold text-slate-700">
               Phòng ban
-              <select
-                className="form-input mt-1"
+              <Select
+                className="mt-1"
                 value={departmentId}
-                onChange={(event) => setDepartmentId(event.target.value)}
+                onChange={(event) => {
+                  idempotencyKeyRef.current = null
+                  uploadIdempotencyKeysRef.current = null
+                  setDepartmentId(event.target.value)
+                }}
                 disabled={isLoading}
               >
                 {departments.map((department) => (
@@ -345,15 +444,19 @@ function DepartmentEvaluationsPage() {
                     {department.name} ({department.code})
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label className="text-sm font-semibold text-slate-700">
               Thứ Hai bắt đầu tuần
-              <input
-                className="form-input mt-1"
+              <Input
+                className="mt-1"
                 type="date"
                 value={weekStart}
-                onChange={(event) => setWeekStart(event.target.value)}
+                onChange={(event) => {
+                  idempotencyKeyRef.current = null
+                  uploadIdempotencyKeysRef.current = null
+                  setWeekStart(event.target.value)
+                }}
               />
             </label>
           </div>
@@ -373,7 +476,7 @@ function DepartmentEvaluationsPage() {
 
           {isReviewLoading || isLoading ? (
             <p className="mt-6 rounded-xl bg-slate-50 p-8 text-center text-slate-500">
-              Đang tổng hợp bằng chứng từ MongoDB...
+              Đang tổng hợp dữ liệu đánh giá...
             </p>
           ) : review ? (
             <form className="mt-6 space-y-6" onSubmit={handleSubmit}>
@@ -507,44 +610,46 @@ function DepartmentEvaluationsPage() {
                   </span>
                 </div>
                 <div className="mt-4 overflow-x-auto">
-                  <table className="min-w-full text-left text-sm">
-                    <thead className="border-b border-slate-200 text-xs uppercase text-slate-500">
-                      <tr>
-                        <th className="px-3 py-3">Nhóm chỉ thị</th>
-                        <th className="px-3 py-3">Trạng thái</th>
-                        <th className="px-3 py-3">Tiến độ</th>
-                        <th className="px-3 py-3">Ngày phát hành</th>
-                        <th className="px-3 py-3">Ngày cam kết</th>
-                        <th className="px-3 py-3">Gửi nghiệm thu</th>
-                        <th className="px-3 py-3">Kết quả thời hạn</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {directives.items.map((item) => (
-                        <tr key={`${item.source}-${item.directive_id}`}>
-                          <td className="px-3 py-3 font-semibold text-slate-800">
-                            {item.source_label}
-                          </td>
-                          <td className="px-3 py-3">{STATUS_LABELS[item.status] || item.status}</td>
-                          <td className="px-3 py-3">{item.progress_percent}%</td>
-                          <td className="px-3 py-3">{formatDateTime(item.issued_at)}</td>
-                          <td className="px-3 py-3">{formatDate(item.commitment_date)}</td>
-                          <td className="px-3 py-3">{formatDateTime(item.submitted_at)}</td>
-                          <td className="px-3 py-3 font-medium">
-                            {TIMING_LABELS[item.timing_status]}
-                            {formatDelay(item.delay_hours)}
-                          </td>
-                        </tr>
-                      ))}
+                  <Table className="min-w-full">
+                    <TableHeader>
+                      <TableRow className="border-b border-slate-200">
+                        <TableHead>Nhóm chỉ thị</TableHead>
+                        <TableHead>Trạng thái</TableHead>
+                        <TableHead>Tiến độ</TableHead>
+                        <TableHead>Ngày phát hành</TableHead>
+                        <TableHead>Ngày cam kết</TableHead>
+                        <TableHead>Gửi nghiệm thu</TableHead>
+                        <TableHead>Kết quả thời hạn</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <AnimatedTableRows>
+                        {directives.items.map((item) => (
+                          <TableRow key={`${item.source}-${item.directive_id}`}>
+                            <TableCell className="font-semibold text-slate-800">
+                              {item.source_label}
+                            </TableCell>
+                            <TableCell>{STATUS_LABELS[item.status] || item.status}</TableCell>
+                            <TableCell>{item.progress_percent}%</TableCell>
+                            <TableCell>{formatDateTime(item.issued_at)}</TableCell>
+                            <TableCell>{formatDate(item.commitment_date)}</TableCell>
+                            <TableCell>{formatDateTime(item.submitted_at)}</TableCell>
+                            <TableCell className="font-medium">
+                              {TIMING_LABELS[item.timing_status]}
+                              {formatDelay(item.delay_hours)}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </AnimatedTableRows>
                       {!directives.items.length && (
-                        <tr>
-                          <td colSpan="7" className="px-3 py-7 text-center text-slate-500">
+                        <TableRow>
+                          <TableCell colSpan="7" className="py-7 text-center text-slate-500">
                             Không có chỉ thị liên quan trong kỳ này.
-                          </td>
-                        </tr>
+                          </TableCell>
+                        </TableRow>
                       )}
-                    </tbody>
-                  </table>
+                    </TableBody>
+                  </Table>
                 </div>
               </section>
 
@@ -553,17 +658,19 @@ function DepartmentEvaluationsPage() {
                   evaluation={existing}
                   onEdit={() => {
                     setFiles([])
+                    idempotencyKeyRef.current = null
+                    uploadIdempotencyKeysRef.current = null
                     setIsEditModalOpen(true)
                   }}
                 />
               ) : (
                 <EvaluationEditor
                   scores={scores}
-                  setScores={setScores}
+                  setScores={updateEvaluationScores}
                   assessmentNote={assessmentNote}
-                  setAssessmentNote={setAssessmentNote}
+                  setAssessmentNote={updateAssessmentNote}
                   files={files}
-                  setFiles={setFiles}
+                  setFiles={updateEvaluationFiles}
                   overallScore={overallScore}
                   canSubmit={canSubmit}
                   isSaving={isSaving}
@@ -573,77 +680,84 @@ function DepartmentEvaluationsPage() {
           ) : null}
         </section>
 
-        <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="mt-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <h2 className="text-xl font-bold text-slate-900">Lịch sử đánh giá tuần</h2>
           <div className="mt-5 overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead className="border-b border-slate-200 text-xs uppercase text-slate-500">
-                <tr>
-                  <th className="px-3 py-3">Tuần</th>
-                  <th className="px-3 py-3">Phòng ban</th>
-                  <th className="px-3 py-3">Điểm tổng</th>
-                  <th className="px-3 py-3">Tài liệu định hướng</th>
-                  <th className="px-3 py-3">Thời điểm đánh giá</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {history.map((item) => (
-                  <tr key={item.id}>
-                    <td className="px-3 py-3">
-                      <button
-                        type="button"
-                        className="text-left font-semibold text-brand-700 hover:underline"
-                        onClick={() => void openHistoryDetail(item.id)}
-                      >
-                        {formatDate(item.week_start)} – {formatDate(item.week_end)}
-                      </button>
-                    </td>
-                    <td className="px-3 py-3 font-semibold">{item.department_name}</td>
-                    <td className="px-3 py-3 font-bold text-brand-700">
-                      {item.overall_score.toFixed(1)}
-                    </td>
-                    <td className="px-3 py-3">{item.attachment_count ?? item.attachments?.length ?? 0} tệp</td>
-                    <td className="px-3 py-3">{formatDateTime(item.evaluated_at)}</td>
-                  </tr>
-                ))}
+            <Table className="min-w-full">
+              <TableHeader>
+                <TableRow className="border-b border-slate-200">
+                  <TableHead>Tuần</TableHead>
+                  <TableHead>Phòng ban</TableHead>
+                  <TableHead>Điểm tổng</TableHead>
+                  <TableHead>Tài liệu định hướng</TableHead>
+                  <TableHead>Thời điểm đánh giá</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                <AnimatedTableRows>
+                  {history.map((item) => (
+                    <TableRow key={item.id}>
+                      <TableCell>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="px-0 text-left font-semibold text-brand-700 shadow-none hover:bg-transparent hover:text-brand-800 hover:underline"
+                          onClick={() => void openHistoryDetail(item.id)}
+                        >
+                          {formatDate(item.week_start)} – {formatDate(item.week_end)}
+                        </Button>
+                      </TableCell>
+                      <TableCell className="font-semibold">{item.department_name}</TableCell>
+                      <TableCell className="font-bold text-brand-700">
+                        {item.overall_score.toFixed(1)}
+                      </TableCell>
+                      <TableCell>
+                        {item.attachment_count ?? item.attachments?.length ?? 0} tệp
+                      </TableCell>
+                      <TableCell>{formatDateTime(item.evaluated_at)}</TableCell>
+                    </TableRow>
+                  ))}
+                </AnimatedTableRows>
                 {!history.length && (
-                  <tr>
-                    <td colSpan="5" className="px-3 py-8 text-center text-slate-500">
+                  <TableRow>
+                    <TableCell colSpan="5" className="py-8 text-center text-slate-500">
                       Chưa có đánh giá phòng ban theo tuần.
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 )}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
           {hasMoreHistory && (
-            <button
+            <Button
               type="button"
-              className="secondary-button mt-4"
+              variant="secondary"
+              className="mt-4"
               onClick={() => void loadMoreHistory()}
               disabled={isLoadingMoreHistory}
             >
               {isLoadingMoreHistory ? 'Đang tải...' : 'Xem thêm lịch sử'}
-            </button>
+            </Button>
           )}
         </section>
       </FadeIn>
 
       {existing && isEditModalOpen && (
-        <Modal
+        <Dialog
           title={`Thay đổi đánh giá · ${review.department_name}`}
-          description={`Tuần ${formatDate(review.week_start)} – ${formatDate(review.week_end)}. Hệ thống vẫn chỉ lưu một kết quả cho tuần này.`}
+          description={`Tuần ${formatDate(review.week_start)} – ${formatDate(review.week_end)}.`}
           className="max-w-5xl"
           onClose={() => !isSaving && setIsEditModalOpen(false)}
         >
           <form onSubmit={handleSubmit}>
             <EvaluationEditor
               scores={scores}
-              setScores={setScores}
+              setScores={updateEvaluationScores}
               assessmentNote={assessmentNote}
-              setAssessmentNote={setAssessmentNote}
+              setAssessmentNote={updateAssessmentNote}
               files={files}
-              setFiles={setFiles}
+              setFiles={updateEvaluationFiles}
               existing={existing}
               overallScore={overallScore}
               canSubmit={canSubmit}
@@ -651,17 +765,17 @@ function DepartmentEvaluationsPage() {
               submitLabel="Lưu thay đổi"
             />
           </form>
-        </Modal>
+        </Dialog>
       )}
 
       {(isHistoryDetailLoading || historyDetailError || selectedHistoryEvaluation) && (
-        <Modal
+        <Dialog
           title={
             selectedHistoryEvaluation
               ? `Chi tiết đánh giá · ${selectedHistoryEvaluation.department_name}`
               : 'Chi tiết đánh giá tuần'
           }
-          description="Thông tin được tải khi bạn mở chi tiết; tài liệu chỉ được mở qua liên kết tạm thời khi bạn bấm chọn."
+          description="Xem chi tiết minh chứng và kết quả đánh giá của tuần."
           className="max-w-3xl"
           onClose={() => {
             if (!isHistoryDetailLoading) {
@@ -681,7 +795,7 @@ function DepartmentEvaluationsPage() {
           {selectedHistoryEvaluation && !isHistoryDetailLoading && (
             <HistoryEvaluationDetail evaluation={selectedHistoryEvaluation} />
           )}
-        </Modal>
+        </Dialog>
       )}
     </MainLayout>
   )
@@ -719,8 +833,8 @@ function ScoreInput({ label, value, onChange }) {
   return (
     <label className="rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
       {label}
-      <input
-        className="form-input mt-2 text-lg font-bold"
+      <Input
+        className="mt-2 text-lg font-bold"
         type="number"
         min="0"
         max="100"
@@ -772,8 +886,8 @@ function EvaluationEditor({
         </div>
         <label className="mt-4 block text-sm font-semibold text-slate-700">
           Nhận xét đánh giá (tùy chọn)
-          <textarea
-            className="form-input mt-1 min-h-24"
+          <Textarea
+            className="mt-1"
             maxLength={1000}
             value={assessmentNote}
             onChange={(event) => setAssessmentNote(event.target.value)}
@@ -781,7 +895,7 @@ function EvaluationEditor({
           />
         </label>
         <label
-          className="mt-4 block rounded-xl border-2 border-dashed border-brand-200 bg-brand-50/50 p-5 text-center text-sm text-slate-700 transition hover:border-brand-400"
+          className="mt-4 block rounded-xl border-2 border-dashed border-brand-200 bg-brand-50/50 p-5 text-center text-sm text-slate-700 transition duration-motion-micro ease-motion-standard hover:border-brand-400"
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
             event.preventDefault()
@@ -825,13 +939,14 @@ function EvaluationEditor({
           <p>Ổn định phòng ban: {Number(scores.stability).toFixed(1)} × 40%</p>
           <p>Đúng hạn: {Number(scores.timeliness).toFixed(1)} × 20%</p>
         </div>
-        <button
+        <Button
           type="submit"
-          className="mt-6 w-full rounded-xl bg-white px-4 py-3 font-bold text-brand-700 shadow-sm transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-6 w-full rounded-xl bg-white px-4 py-3 font-bold text-brand-700 hover:bg-blue-50"
+          loading={isSaving}
           disabled={!canSubmit}
         >
           {isSaving ? 'Đang lưu...' : submitLabel}
-        </button>
+        </Button>
       </aside>
     </section>
   )
@@ -857,9 +972,9 @@ function CompletedEvaluationSummary({ evaluation, onEdit }) {
           )}
           <AttachmentLinks evaluationId={evaluation.id} attachments={evaluation.attachments} />
         </div>
-        <button type="button" className="secondary-button" onClick={onEdit}>
+        <Button type="button" variant="secondary" onClick={onEdit}>
           Thay đổi đánh giá
-        </button>
+        </Button>
       </div>
     </section>
   )
@@ -876,8 +991,14 @@ function HistoryEvaluationDetail({ evaluation }) {
           label="Thực hiện chỉ thị"
           value={`${Number(evaluation.directive_execution_score).toFixed(1)}`}
         />
-        <DetailMetric label="Ổn định phòng ban" value={`${Number(evaluation.stability_score).toFixed(1)}`} />
-        <DetailMetric label="Đúng hạn" value={`${Number(evaluation.timeliness_score).toFixed(1)}`} />
+        <DetailMetric
+          label="Ổn định phòng ban"
+          value={`${Number(evaluation.stability_score).toFixed(1)}`}
+        />
+        <DetailMetric
+          label="Đúng hạn"
+          value={`${Number(evaluation.timeliness_score).toFixed(1)}`}
+        />
       </div>
       <div className="rounded-xl bg-slate-50 p-4 text-sm text-slate-700">
         <p>
@@ -885,19 +1006,22 @@ function HistoryEvaluationDetail({ evaluation }) {
         </p>
         <p className="mt-1">Đánh giá lúc: {formatDateTime(evaluation.evaluated_at)}</p>
         {evaluation.evaluation_delay_days > 0 && (
-          <p className="mt-1 text-amber-700">Đánh giá trễ {evaluation.evaluation_delay_days} ngày.</p>
+          <p className="mt-1 text-amber-700">
+            Đánh giá trễ {evaluation.evaluation_delay_days} ngày.
+          </p>
         )}
       </div>
       {indicator && directives && (
         <div className="rounded-xl border border-slate-200 p-4 text-sm text-slate-700">
           <h3 className="font-bold text-slate-900">Snapshot bằng chứng</h3>
           <p className="mt-2">
-            Hiệu suất trung bình: {formatNumber(indicator.current?.average_performance_score, ' điểm')} ·{' '}
-            Chất lượng: {formatNumber(indicator.current?.average_quality_score, ' điểm')}
+            Hiệu suất trung bình:{' '}
+            {formatNumber(indicator.current?.average_performance_score, ' điểm')} · Chất lượng:{' '}
+            {formatNumber(indicator.current?.average_quality_score, ' điểm')}
           </p>
           <p className="mt-1">
-            Chỉ thị liên quan: {directives.total_count} · Đã nghiệm thu: {directives.accepted_count} ·{' '}
-            Cần xử lý lại: {directives.needs_revision_count}
+            Chỉ thị liên quan: {directives.total_count} · Đã nghiệm thu: {directives.accepted_count}{' '}
+            · Cần xử lý lại: {directives.needs_revision_count}
           </p>
         </div>
       )}

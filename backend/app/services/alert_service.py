@@ -1,12 +1,15 @@
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import date as Date
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bson import ObjectId
 from fastapi import HTTPException, status
 from pymongo.errors import PyMongoError
 
+from app.core.mongo_types import to_mongo_datetime
+from app.core.pagination import Page
 from app.core.time import BusinessClock
 from app.events.event_bus import ALERT_CREATED, event_bus
 from app.models.alert import (
@@ -73,11 +76,66 @@ class EarlyWarningService:
             for document in await self.alert_repository.find_many(scope, alert_status, alert_type)
         ]
 
+    async def list_alerts_page(
+        self,
+        scope: ObjectId | None,
+        alert_status: str | None,
+        alert_type: str | None,
+        offset: int,
+        limit: int,
+    ) -> Page[AlertResponse]:
+        page = await self.alert_repository.find_many_page(
+            scope, alert_status, alert_type, offset, limit
+        )
+        return Page(items=[self._response(document) for document in page.items], total=page.total)
+
+    async def list_alerts_page_v1(
+        self,
+        scope: ObjectId | None,
+        department_id: str | None,
+        alert_status: str | None,
+        alert_type: str | None,
+        severity: str | None,
+        from_date: Date | None,
+        to_date: Date | None,
+        sort_stage: dict[str, int],
+        page: int,
+        page_size: int,
+    ) -> Page[AlertResponse]:
+        requested_department = (
+            parse_object_id(department_id, "Mã phòng ban") if department_id else None
+        )
+        created_at: dict[str, datetime] = {}
+        if from_date is not None:
+            created_at["$gte"] = to_mongo_datetime(from_date)
+        if to_date is not None:
+            created_at["$lt"] = to_mongo_datetime(to_date + timedelta(days=1))
+        result = await self.alert_repository.find_many_page_v1(
+            scope if scope is not None else requested_department,
+            alert_status,
+            alert_type,
+            severity,
+            created_at or None,
+            sort_stage,
+            page,
+            page_size,
+        )
+        return Page(items=[self._response(document) for document in result.items], total=result.total)
+
     async def list_department_summaries(self) -> list[DepartmentAlertSummaryResponse]:
         return [
             DepartmentAlertSummaryResponse.model_validate(document)
             for document in await self.alert_repository.list_department_summaries()
         ]
+
+    async def list_department_summaries_page(
+        self, offset: int, limit: int
+    ) -> Page[DepartmentAlertSummaryResponse]:
+        page = await self.alert_repository.list_department_summaries_page(offset, limit)
+        return Page(
+            items=[DepartmentAlertSummaryResponse.model_validate(document) for document in page.items],
+            total=page.total,
+        )
 
     async def resolve(
         self,
@@ -100,7 +158,7 @@ class EarlyWarningService:
         if alert.status == AlertStatus.RESOLVED:
             return self._response(alert)
         now = self._clock.now()
-        updated = await self.alert_repository.update(
+        updated = await self.alert_repository.resolve_if_open(
             object_id,
             {
                 "status": AlertStatus.RESOLVED.value,
@@ -113,6 +171,9 @@ class EarlyWarningService:
             },
         )
         if updated is None:
+            current = await self.alert_repository.find_by_id(object_id)
+            if current is not None and current.status == AlertStatus.RESOLVED:
+                return self._response(current)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy cảnh báo"
             )

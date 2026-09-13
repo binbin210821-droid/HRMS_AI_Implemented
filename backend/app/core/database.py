@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import timezone
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo.errors import PyMongoError
@@ -14,7 +15,12 @@ class MongoDatabase:
         self.database: AsyncIOMotorDatabase | None = None
 
     async def connect(self) -> None:
-        self.client = AsyncIOMotorClient(self.settings.mongo_uri, serverSelectionTimeoutMS=5000)
+        self.client = AsyncIOMotorClient(
+            self.settings.mongo_uri,
+            serverSelectionTimeoutMS=5000,
+            tz_aware=True,
+            tzinfo=timezone.utc,
+        )
         await self.client.admin.command("ping")
         self.database = self.client[self.settings.database_name]
 

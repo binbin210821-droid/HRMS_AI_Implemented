@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-quality:
+    name: Backend quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Mypy
+        run: mypy app
+
+      - name: Compile Python
+        run: python -m compileall -q app scripts
+
+      - name: Contract and architecture checks
+        run: |
+          python scripts/check_app.py
+          python scripts/check_compose.py
+          python scripts/check_api_callers.py
+
+      - name: Unit tests
+        run: pytest -q
+
+  frontend-quality:
+    name: Frontend quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier
+        run: npm run format:check
+
+      - name: Navigation contract
+        run: npm run check:navigation
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Start preview server
+        run: npm run preview -- --host 127.0.0.1 --port 5173 > /tmp/hrms-frontend-preview.log 2>&1 &
+
+      - name: Wait for preview
+        run: curl --fail --retry 30 --retry-delay 1 http://127.0.0.1:5173/
+
+      - name: UI E2E smoke
+        run: npm run test:e2e
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            frontend/test-results
+            frontend/playwright-report
+            /tmp/hrms-frontend-preview.log
+          if-no-files-found: ignore
+
+  integration:
+    name: MongoDB and Redis integration
+    runs-on: ubuntu-latest
+    env:
+      MONGO_URI: mongodb://127.0.0.1:27017/hrms_ci?replicaSet=rs0
+      DATABASE_NAME: hrms_ci
+      REDIS_URL: redis://127.0.0.1:6379/15
+      RATE_LIMIT_BACKEND: redis
+      IDEMPOTENCY_ENABLED: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Start CI dependencies
+        run: |
+          docker compose -f docker-compose.ci.yml up -d mongodb redis
+          docker compose -f docker-compose.ci.yml run --rm mongodb-init
+          for attempt in {1..30}; do
+            if docker compose -f docker-compose.ci.yml exec -T mongodb mongosh --quiet --eval "rs.status().myState" | grep -q '^1$'; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then exit 1; fi
+            sleep 1
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run integration tests
+        working-directory: backend
+        env:
+          RUN_MULTI_WORKER_TESTS: "1"
+        run: pytest tests/test_directive_repository_pagination.py tests/test_multi_worker_integration.py -m integration -q
+
+      - name: Redis smoke
+        working-directory: backend
+        run: python scripts/smoke_redis.py --redis-url "$REDIS_URL"
+
+      - name: Collect dependency logs
+        if: failure()
+        run: docker compose -f docker-compose.ci.yml logs --no-color
+
+      - name: Stop CI dependencies
+        if: always()
+        run: docker compose -f docker-compose.ci.yml down -v --remove-orphans
+
+  container-build:
+    name: Container build
+    needs: [backend-quality, frontend-quality, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build backend image
+        run: docker build --tag hrms-backend:ci ./backend
+
+      - name: Build frontend image
+        run: docker build --tag hrms-frontend:ci ./frontend

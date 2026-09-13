@@ -47,12 +47,6 @@ class DashboardAttentionService:
             directed_alert_ids = await self.department_directive_repository.list_alert_ids(scope)
             alerts = [alert for alert in alerts if alert.id not in directed_alert_ids]
 
-        # Leadership chỉ theo dõi các công việc chưa được đưa vào chỉ thị.
-        # Manager vẫn cần thấy công việc trong phạm vi của mình để tiếp tục xử lý.
-        if scope is None:
-            directed_task_ids = await self.task_repository.list_directed_task_ids()
-            overdue_tasks = [task for task in overdue_tasks if task.id not in directed_task_ids]
-
         employee_map = {employee.id: employee for employee in employees}
         department_map = {department.id: department.name for department in departments}
         items = [self._alert_item(alert, department_map) for alert in alerts]

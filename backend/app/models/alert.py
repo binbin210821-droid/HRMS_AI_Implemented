@@ -1,6 +1,7 @@
 from datetime import date as Date
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from bson import ObjectId
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,4 +76,9 @@ class DepartmentAlertSummaryResponse(BaseModel):
 
 
 class AlertResolveRequest(BaseModel):
+    resolution_note: str | None = Field(default=None, max_length=1000)
+
+
+class AlertResolveV1Request(BaseModel):
+    status: Literal["resolved"]
     resolution_note: str | None = Field(default=None, max_length=1000)

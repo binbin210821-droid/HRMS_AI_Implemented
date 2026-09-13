@@ -14,9 +14,11 @@ import {
 } from 'recharts'
 
 import { FadeIn } from '../../components/animations/index.js'
+import { useActionFeedback } from '../../components/feedback/index.js'
 import MainLayout from '../../components/layout/MainLayout.jsx'
-import Modal from '../../components/Modal.jsx'
-import { useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { Button, Dialog, EmptyState, Select, Textarea } from '../../components/ui/index.js'
+import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
+import { generateIdempotencyKey } from '../../utils/idempotency.js'
 import {
   getDepartmentTaskPortfolio,
   getLeadershipTaskOverview,
@@ -43,8 +45,29 @@ const STATUS_LABELS = {
   in_progress: 'Đang thực hiện',
   done: 'Đã hoàn thành',
 }
+const DIRECTIVE_STATUS_LABELS = {
+  pending: 'Đã ra chỉ thị · Chờ tiếp nhận',
+  acknowledged: 'Đang thực hiện chỉ thị',
+  submitted: 'Chờ nghiệm thu chỉ thị',
+  accepted: 'Đã nghiệm thu chỉ thị',
+  needs_revision: 'Cần xử lý lại chỉ thị',
+}
+
+function getDirectiveStatusLabel(task) {
+  if (!task.directive_id) return 'Chưa ra chỉ thị'
+  if (task.has_active_directive === false && task.directive_status === 'accepted') {
+    return 'Đã nghiệm thu trước đó · Có thể ra chỉ thị mới'
+  }
+  return DIRECTIVE_STATUS_LABELS[task.directive_status] || 'Đã ra chỉ thị'
+}
+
+function hasActiveDirective(task) {
+  if (typeof task.has_active_directive === 'boolean') return task.has_active_directive
+  return Boolean(task.directive_id && task.directive_status !== 'accepted')
+}
 
 function LeadershipTasksOverview() {
+  const { confirmAction, notifyActionSuccess, notifyActionError } = useActionFeedback()
   const [searchParams, setSearchParams] = useSearchParams()
   const [range, setRange] = useState('30d')
   const [overview, setOverview] = useState(null)
@@ -61,6 +84,7 @@ function LeadershipTasksOverview() {
   const [directiveForm, setDirectiveForm] = useState({ focus: 'overdue', note: '', taskIds: [] })
   const [directiveSaving, setDirectiveSaving] = useState(false)
   const [directiveError, setDirectiveError] = useState('')
+  const directiveIdempotencyKeyRef = useRef(null)
   const dismissedDeepLinkRef = useRef('')
 
   const loadOverview = useCallback(async () => {
@@ -84,12 +108,20 @@ function LeadershipTasksOverview() {
     void loadOverview()
   }, [loadOverview])
 
-  useRealtimeUpdates('tasks', () => {
-    void loadOverview()
-  })
-  useRealtimeUpdates('task_directives', () => {
-    void loadOverview()
-  })
+  useRealtimeUpdates(
+    'tasks',
+    () => {
+      void loadOverview()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
+  useRealtimeUpdates(
+    'task_directives',
+    () => {
+      void loadOverview()
+    },
+    { coalesceDelay: REALTIME_COALESCE_DELAY },
+  )
 
   const openPortfolio = useCallback(
     async (department, highlightedTaskId = '', initialDirectiveFilter = 'all') => {
@@ -159,6 +191,7 @@ function LeadershipTasksOverview() {
     setDirectiveDepartment(department)
     setDirectiveForm({ focus: 'overdue', note: '', taskIds: selectedTaskIds })
     setDirectiveError('')
+    directiveIdempotencyKeyRef.current = generateIdempotencyKey()
   }
 
   function handlePortfolioIssue(taskIds) {
@@ -171,6 +204,18 @@ function LeadershipTasksOverview() {
   async function handleIssueDirective(event) {
     event.preventDefault()
     if (!directiveDepartment || directiveSaving) return
+    const confirmed = await confirmAction({
+      title: 'Xác nhận phát hành chỉ thị công việc',
+      description: 'Chỉ thị sẽ được gửi đến Quản lý của phòng ban được chọn.',
+      details: [
+        `Phòng ban: ${directiveDepartment.department_name}`,
+        `Nội dung: ${FOCUS_LABELS[directiveForm.focus] || directiveForm.focus}`,
+        `Số công việc chọn: ${directiveForm.taskIds?.length || 0}`,
+        `Ghi chú: ${directiveForm.note.trim() || 'Không thêm ghi chú'}`,
+      ],
+      confirmLabel: 'Xác nhận phát hành',
+    })
+    if (!confirmed) return
     setDirectiveSaving(true)
     setDirectiveError('')
     try {
@@ -179,12 +224,24 @@ function LeadershipTasksOverview() {
         note: directiveForm.note,
       }
       if (directiveForm.taskIds?.length) payload.task_ids = directiveForm.taskIds
-      await issueDepartmentTaskDirective(directiveDepartment.department_id, payload)
+      await issueDepartmentTaskDirective(
+        directiveDepartment.department_id,
+        payload,
+        directiveIdempotencyKeyRef.current,
+      )
       setDirectiveDepartment(null)
       setSelectedDirectiveTaskIds([])
+      directiveIdempotencyKeyRef.current = null
       await loadOverview()
+      notifyActionSuccess({
+        title: 'Đã phát hành chỉ thị công việc',
+        message: `Chỉ thị cho ${directiveDepartment.department_name} đã được gửi thành công.`,
+        details: [`Nội dung: ${FOCUS_LABELS[directiveForm.focus] || directiveForm.focus}`],
+      })
     } catch (requestError) {
-      setDirectiveError(requestError.message || 'Không thể phát hành chỉ thị công việc.')
+      const message = requestError.message || 'Không thể phát hành chỉ thị công việc.'
+      setDirectiveError(message)
+      notifyActionError({ title: 'Chưa phát hành chỉ thị', message })
       if (requestError.status === 409) {
         // Đồng bộ lại card ngay cả khi tab đang mở bị trễ so với dữ liệu MongoDB.
         await loadOverview()
@@ -213,7 +270,7 @@ function LeadershipTasksOverview() {
   return (
     <MainLayout>
       <FadeIn className="mx-auto max-w-7xl space-y-6">
-        <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <p className="!text-caption !font-semibold !uppercase !tracking-wider !text-brand-600">
@@ -227,8 +284,8 @@ function LeadershipTasksOverview() {
             </div>
             <label className="text-sm font-semibold text-slate-700">
               Kỳ thống kê
-              <select
-                className="form-input mt-1 min-w-40"
+              <Select
+                className="mt-1 min-w-40"
                 value={range}
                 onChange={(event) => setRange(event.target.value)}
               >
@@ -237,7 +294,7 @@ function LeadershipTasksOverview() {
                     {label} gần nhất
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
           </div>
 
@@ -323,7 +380,7 @@ function LeadershipTasksOverview() {
                   </ResponsiveContainer>
                 </div>
               ) : (
-                <EmptyState text="Chưa có công việc đang mở trong công ty." />
+                <EmptyState title="Chưa có công việc đang mở trong công ty." />
               )}
             </ChartCard>
 
@@ -357,7 +414,7 @@ function LeadershipTasksOverview() {
         )}
 
         {overview && (
-          <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 sm:p-8">
+          <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200 sm:p-6">
             <div>
               <h2 className="text-slate-900">Tình hình công việc theo phòng ban</h2>
               <p className="mt-2 text-ink-600">
@@ -369,9 +426,7 @@ function LeadershipTasksOverview() {
             <div className="mt-6 grid gap-4 lg:grid-cols-2">
               {overview.departments.map((department) => {
                 const pending = pendingByDepartment.get(department.department_id) || []
-                const hasPendingOverdueDirective = pending.some(
-                  (item) => item.focus === 'overdue',
-                )
+                const hasPendingOverdueDirective = pending.some((item) => item.focus === 'overdue')
                 return (
                   <article
                     key={department.department_id}
@@ -427,19 +482,17 @@ function LeadershipTasksOverview() {
                     )}
 
                     <div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-4">
-                      <button
+                      <Button
                         type="button"
-                        className="secondary-button"
+                        variant="secondary"
                         onClick={() => void openPortfolio(department)}
                       >
                         Xem chi tiết
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
-                        className="primary-button"
                         disabled={
-                          department.undirected_overdue_count === 0 ||
-                          !department.manager_name
+                          department.undirected_overdue_count === 0 || !department.manager_name
                         }
                         onClick={() => void openPortfolio(department, '', 'not_directed')}
                       >
@@ -450,7 +503,7 @@ function LeadershipTasksOverview() {
                           : hasPendingOverdueDirective
                             ? 'Bổ sung vào chỉ thị'
                             : 'Ra chỉ thị cho Quản lý'}
-                      </button>
+                      </Button>
                     </div>
                   </article>
                 )
@@ -461,13 +514,13 @@ function LeadershipTasksOverview() {
       </FadeIn>
 
       {portfolioDepartment && (
-        <Modal
+        <Dialog
           title={`Danh mục công việc · ${portfolioDepartment.department_name}`}
-          description="Thông tin tổng quan chỉ đọc; việc phân công nhân viên thuộc trách nhiệm của Quản lý phòng ban."
+          description="Xem chi tiết công việc theo từng phòng ban."
           className="max-w-5xl"
           onClose={closePortfolio}
         >
-          {portfolioLoading && <EmptyState text="Đang tải danh mục công việc..." />}
+          {portfolioLoading && <EmptyState title="Đang tải danh mục công việc..." />}
           {portfolioError && (
             <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{portfolioError}</p>
           )}
@@ -488,16 +541,16 @@ function LeadershipTasksOverview() {
               onSelectTasks={setSelectedDirectiveTaskIds}
             />
           )}
-        </Modal>
+        </Dialog>
       )}
 
       {directiveDepartment && (
-        <Modal
+        <Dialog
           title={`Ra chỉ thị · ${directiveDepartment.department_name}`}
           description={
             directiveForm.taskIds?.length
               ? 'Chỉ thị sẽ bao gồm đúng các công việc bạn đã chọn trong danh mục.'
-              : 'Backend sẽ tự chọn các công việc phù hợp chưa từng được gửi chỉ thị.'
+              : 'Hệ thống sẽ chọn các công việc phù hợp chưa từng được gửi chỉ thị.'
           }
           onClose={() => {
             setDirectiveDepartment(null)
@@ -518,8 +571,8 @@ function LeadershipTasksOverview() {
             )}
             <label className="block text-sm font-semibold text-slate-700">
               Nội dung chỉ thị
-              <textarea
-                className="form-input mt-1 min-h-28"
+              <Textarea
+                className="mt-1 min-h-28"
                 maxLength={1000}
                 placeholder="Ví dụ: Đề nghị rà soát, phân bổ lại nguồn lực và cập nhật tiến độ trong ngày."
                 value={directiveForm.note}
@@ -529,26 +582,24 @@ function LeadershipTasksOverview() {
               />
             </label>
             <div className="flex justify-end gap-3 pt-2">
-              <button
+              <Button
                 type="button"
-                className="secondary-button"
+                variant="secondary"
                 onClick={() => {
                   setDirectiveDepartment(null)
                   setSelectedDirectiveTaskIds([])
                 }}
               >
                 Hủy
-              </button>
-              <button type="submit" className="primary-button" disabled={directiveSaving}>
-                {directiveSaving
-                  ? 'Đang gửi...'
-                  : directiveForm.taskIds?.length
-                    ? `Gửi chỉ thị cho ${directiveForm.taskIds.length} việc`
-                    : 'Gửi chỉ thị'}
-              </button>
+              </Button>
+              <Button type="submit" loading={directiveSaving} disabled={directiveSaving}>
+                {directiveForm.taskIds?.length
+                  ? `Gửi chỉ thị cho ${directiveForm.taskIds.length} việc`
+                  : 'Gửi chỉ thị'}
+              </Button>
             </div>
           </form>
-        </Modal>
+        </Dialog>
       )}
     </MainLayout>
   )
@@ -579,7 +630,7 @@ function PortfolioContent({
   const visibleGroups = groups.map(([title, tasks, emptyText]) => [
     title,
     tasks.filter((task) => {
-      const isDirected = Boolean(task.directive_id)
+      const isDirected = hasActiveDirective(task)
       return (
         directiveFilter === 'all' ||
         (directiveFilter === 'directed' && isDirected) ||
@@ -590,7 +641,7 @@ function PortfolioContent({
   ])
   const selectableTaskIds = groups
     .flatMap(([, tasks]) => tasks)
-    .filter((task) => task.is_overdue && !task.directive_id)
+    .filter((task) => task.is_overdue && !hasActiveDirective(task))
     .map((task) => task.id)
   const allSelectableTasksSelected =
     selectableTaskIds.length > 0 && selectableTaskIds.every((taskId) => selectedSet.has(taskId))
@@ -604,15 +655,15 @@ function PortfolioContent({
         </p>
         <label className="text-sm font-semibold text-slate-700">
           Lọc trạng thái chỉ thị
-          <select
-            className="form-input mt-1 min-w-48"
+          <Select
+            className="mt-1 min-w-48"
             value={directiveFilter}
             onChange={(event) => setDirectiveFilter(event.target.value)}
           >
             <option value="all">Tất cả công việc</option>
             <option value="not_directed">Chưa ra chỉ thị</option>
             <option value="directed">Đã ra chỉ thị</option>
-          </select>
+          </Select>
         </label>
       </div>
 
@@ -621,15 +672,13 @@ function PortfolioContent({
           <p className="text-sm text-slate-600">
             Có {selectableTaskIds.length} công việc quá hạn chưa ra chỉ thị.
           </p>
-          <button
+          <Button
             type="button"
-            className="secondary-button"
-            onClick={() =>
-              onSelectTasks(allSelectableTasksSelected ? [] : selectableTaskIds)
-            }
+            variant="secondary"
+            onClick={() => onSelectTasks(allSelectableTasksSelected ? [] : selectableTaskIds)}
           >
             {allSelectableTasksSelected ? 'Bỏ chọn tất cả' : 'Chọn tất cả việc quá hạn'}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -638,59 +687,56 @@ function PortfolioContent({
           <p className="text-sm font-semibold text-blue-800">
             Đã chọn {selectedTaskIds.length} công việc quá hạn chưa ra chỉ thị.
           </p>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={() => onIssueSelected(selectedTaskIds)}
-          >
+          <Button type="button" onClick={() => onIssueSelected(selectedTaskIds)}>
             Ra chỉ thị cho {selectedTaskIds.length} việc đã chọn
-          </button>
+          </Button>
         </div>
       )}
 
       <div className="grid gap-4 md:grid-cols-2">
-      {visibleGroups.map(([title, tasks, emptyText]) => (
-        <section key={title} className="rounded-xl border border-slate-200">
-          <h3 className="border-b border-slate-200 px-4 py-3 text-base font-bold text-slate-900">
-            {title} ({tasks.length})
-          </h3>
-          {tasks.length === 0 ? (
-            <p className="px-4 py-5 text-sm text-slate-500">{emptyText}</p>
-          ) : (
-            <div className="divide-y divide-slate-100">
-              {tasks.map((task) => (
-                <PortfolioTask
-                  key={task.id}
-                  task={task}
-                  highlightedTaskId={highlightedTaskId}
-                  isSelected={selectedSet.has(task.id)}
-                  onToggleTask={onToggleTask}
-                />
-              ))}
-            </div>
-          )}
-        </section>
-      ))}
+        {visibleGroups.map(([title, tasks, emptyText]) => (
+          <section key={title} className="rounded-xl border border-slate-200">
+            <h3 className="border-b border-slate-200 px-4 py-3 text-base font-bold text-slate-900">
+              {title} ({tasks.length})
+            </h3>
+            {tasks.length === 0 ? (
+              <p className="px-4 py-5 text-sm text-slate-500">{emptyText}</p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {tasks.map((task) => (
+                  <PortfolioTask
+                    key={task.id}
+                    task={task}
+                    highlightedTaskId={highlightedTaskId}
+                    isSelected={selectedSet.has(task.id)}
+                    onToggleTask={onToggleTask}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        ))}
       </div>
     </div>
   )
 }
 
 function PortfolioTask({ task, highlightedTaskId, isSelected, onToggleTask }) {
-  const isDirected = Boolean(task.directive_id)
+  const isDirected = hasActiveDirective(task)
   const canSelect = task.is_overdue && !isDirected
+  const directiveStatusLabel = getDirectiveStatusLabel(task)
 
   return (
     <article
       id={`leadership-task-${task.id}`}
-      className={`p-4 transition ${task.id === highlightedTaskId ? 'bg-blue-50 ring-2 ring-inset ring-brand-300' : 'bg-white'}`}
+      className={`p-4 transition duration-motion-standard ease-motion-standard ${task.id === highlightedTaskId ? 'bg-blue-50 ring-2 ring-inset ring-brand-300' : 'bg-white'}`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <p className="font-semibold text-slate-900">{task.title}</p>
         <span
           className={`rounded-full px-2 py-1 text-xs font-semibold ${isDirected ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}
         >
-          {isDirected ? 'Đã ra chỉ thị' : 'Chưa ra chỉ thị'}
+          {directiveStatusLabel}
         </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
@@ -706,13 +752,14 @@ function PortfolioTask({ task, highlightedTaskId, isSelected, onToggleTask }) {
         </span>
       </div>
       {canSelect && (
-        <button
+        <Button
           type="button"
-          className="secondary-button mt-3"
+          variant="secondary"
+          className="mt-3"
           onClick={() => onToggleTask(task.id)}
         >
           {isSelected ? 'Bỏ chọn' : 'Thêm vào chỉ thị'}
-        </button>
+        </Button>
       )}
     </article>
   )
@@ -756,10 +803,6 @@ function ChartCard({ title, description, children }) {
       <div className="mt-5">{children}</div>
     </section>
   )
-}
-
-function EmptyState({ text }) {
-  return <p className="rounded-xl bg-slate-50 p-6 text-center text-sm text-slate-500">{text}</p>
 }
 
 function formatDate(value) {

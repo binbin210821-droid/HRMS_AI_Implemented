@@ -15,6 +15,7 @@ vi.mock('../../components/layout/MainLayout.jsx', () => ({
 }))
 
 vi.mock('../../hooks/useRealtimeUpdates.js', () => ({
+  REALTIME_COALESCE_DELAY: 250,
   useRealtimeUpdates: vi.fn(),
 }))
 
@@ -154,20 +155,84 @@ describe('LeadershipTasksOverview', () => {
 
     expect(screen.getByText('Đang quá hạn (1)')).toBeInTheDocument()
     expect(screen.getByText('Công việc chưa gửi')).toBeInTheDocument()
+    expect(screen.getAllByText('Chưa ra chỉ thị').length).toBeGreaterThanOrEqual(2)
     expect(screen.queryByText('Công việc đã gửi')).not.toBeInTheDocument()
+    fireEvent.change(filter, { target: { value: 'all' } })
+    expect(screen.getByText('Đã ra chỉ thị · Chờ tiếp nhận')).toBeInTheDocument()
+    fireEvent.change(filter, { target: { value: 'not_directed' } })
     fireEvent.click(screen.getByRole('button', { name: 'Thêm vào chỉ thị' }))
     expect(screen.getByText('Đã chọn 1 công việc quá hạn chưa ra chỉ thị.')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Ra chỉ thị cho 1 việc đã chọn' }))
-    expect(await screen.findByText('Đã chọn 1 công việc quá hạn để đưa vào chỉ thị.')).toBeInTheDocument()
+    expect(
+      await screen.findByText('Đã chọn 1 công việc quá hạn để đưa vào chỉ thị.'),
+    ).toBeInTheDocument()
     issueDepartmentTaskDirective.mockResolvedValue({})
     fireEvent.click(screen.getByRole('button', { name: 'Gửi chỉ thị cho 1 việc' }))
     await waitFor(() => {
-      expect(issueDepartmentTaskDirective).toHaveBeenCalledWith('department-kd', {
-        focus: 'overdue',
-        note: '',
-        task_ids: ['task-unsent'],
-      })
+      expect(issueDepartmentTaskDirective).toHaveBeenCalledWith(
+        'department-kd',
+        {
+          focus: 'overdue',
+          note: '',
+          task_ids: ['task-unsent'],
+        },
+        expect.any(String),
+      )
     })
+  })
+
+  it('đưa việc đã nghiệm thu trước đó trở lại nhóm có thể ra chỉ thị mới', async () => {
+    getDepartmentTaskPortfolio.mockResolvedValue({
+      range: '30d',
+      overdue: [
+        {
+          id: 'task-reopened',
+          title: 'Công việc đã mở lại',
+          priority: 'high',
+          status: 'todo',
+          due_date: '2026-09-01',
+          is_overdue: true,
+          subtask_count: 0,
+          directive_id: 'directive-accepted',
+          directive_status: 'accepted',
+          has_active_directive: false,
+        },
+        {
+          id: 'task-active',
+          title: 'Công việc đang có chỉ thị',
+          priority: 'high',
+          status: 'in_progress',
+          due_date: '2026-09-01',
+          is_overdue: true,
+          subtask_count: 0,
+          directive_id: 'directive-pending',
+          directive_status: 'pending',
+          has_active_directive: true,
+        },
+      ],
+      due_soon: [],
+      high_priority: [],
+      on_track: [],
+      completed_in_period: [],
+    })
+
+    render(
+      <MemoryRouter>
+        <LeadershipTasksOverview />
+      </MemoryRouter>,
+    )
+
+    const directiveButtons = await screen.findAllByRole('button', {
+      name: 'Ra chỉ thị cho Quản lý',
+    })
+    fireEvent.click(directiveButtons.at(-1))
+
+    expect(await screen.findByText('Đang quá hạn (1)')).toBeInTheDocument()
+    expect(await screen.findByText('Công việc đã mở lại')).toBeInTheDocument()
+    expect(screen.queryByText('Công việc đang có chỉ thị')).not.toBeInTheDocument()
+    expect(screen.getByText('Đã nghiệm thu trước đó · Có thể ra chỉ thị mới')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Thêm vào chỉ thị' }))
+    expect(screen.getByText('Đã chọn 1 công việc quá hạn chưa ra chỉ thị.')).toBeInTheDocument()
   })
 })

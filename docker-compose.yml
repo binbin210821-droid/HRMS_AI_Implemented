@@ -27,6 +27,21 @@ services:
         try { rs.status(); print('Replica set da duoc khoi tao.'); }
         catch (error) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}); }
 
+  redis:
+    image: redis:7-alpine
+    container_name: hrms-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - hrms_redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   minio:
     image: minio/minio:latest
     container_name: hrms-minio
@@ -44,3 +59,4 @@ services:
 volumes:
   hrms_mongodb_data:
   hrms_minio_data:
+  hrms_redis_data:

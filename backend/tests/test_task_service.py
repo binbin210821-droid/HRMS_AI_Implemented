@@ -3,12 +3,15 @@ from datetime import date, datetime, timezone
 import pytest
 from bson import ObjectId
 from fastapi import HTTPException
+from pymongo.errors import DuplicateKeyError
 
 from app.models.department import DepartmentDocument
 from app.models.employee import EmployeeDocument
 from app.models.task import (
+    ACTIVE_DIRECTIVE_STATUSES,
     AcknowledgeDepartmentTaskDirectiveRequest,
     DepartmentTaskDirectiveDocument,
+    DepartmentTaskDirectiveStatus,
     IssueDepartmentTaskDirectiveRequest,
     ReviewDepartmentTaskDirectiveRequest,
     SubmitDepartmentTaskDirectiveRequest,
@@ -113,10 +116,16 @@ class FakeTaskRepository:
         return created
 
     async def update(
-        self, task_id: ObjectId, values: dict, scope: ObjectId | None = None
+        self,
+        task_id: ObjectId,
+        values: dict,
+        scope: ObjectId | None = None,
+        expected_updated_at: datetime | None = None,
     ) -> TaskDocument | None:
         current = await self.find_by_id(task_id, scope)
         if current is None:
+            return None
+        if expected_updated_at is not None and current.updated_at != expected_updated_at:
             return None
         updated = current.model_dump(by_alias=True)
         updated.update(values)
@@ -155,8 +164,13 @@ class FakeTaskRepository:
     async def find_user(self, user_id: ObjectId) -> UserDocument | None:
         return self.users.get(user_id)
 
-    async def list_directed_task_ids(self) -> set[ObjectId]:
-        return {task_id for item in self.directives.values() for task_id in item.task_ids}
+    async def list_directed_task_ids(self, statuses: set[str] | None = None) -> set[ObjectId]:
+        return {
+            task_id
+            for item in self.directives.values()
+            if not statuses or item.status.value in statuses
+            for task_id in item.task_ids
+        }
 
     async def insert_department_directive(
         self, document: dict
@@ -231,6 +245,11 @@ class FakeTaskRepository:
         self.audits.append(document)
 
 
+class AppendDuplicateTaskRepository(FakeTaskRepository):
+    async def append_department_directive_tasks(self, _directive_id, _task_ids):
+        raise DuplicateKeyError("trùng chỉ thị trong lúc bổ sung công việc")
+
+
 def task_request(
     employee_id: ObjectId, title: str = "Chuẩn bị báo cáo", due_date: date | None = None
 ) -> TaskCreate:
@@ -283,7 +302,7 @@ async def test_leadership_cannot_create_and_manager_sees_only_own_scope() -> Non
 
 
 @pytest.mark.asyncio
-async def test_leadership_overdue_list_excludes_tasks_already_in_directive() -> None:
+async def test_leadership_overdue_list_includes_tasks_already_in_directive() -> None:
     department_id = ObjectId()
     employee = make_employee(department_id)
     repository = FakeTaskRepository([employee])
@@ -303,7 +322,7 @@ async def test_leadership_overdue_list_excludes_tasks_already_in_directive() -> 
         IssueDepartmentTaskDirectiveRequest(focus=TaskDirectiveFocus.OVERDUE),
     )
 
-    assert await service.list(None, overdue_only=True) == []
+    assert len(await service.list(None, overdue_only=True)) == 1
     assert len(await service.list(department_id, overdue_only=True)) == 1
 
 
@@ -327,6 +346,73 @@ async def test_update_done_sets_completion_and_overdue_is_calculated() -> None:
     assert updated.status == TaskStatus.DONE
     assert updated.is_overdue is False
     assert updated.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_applying_ai_plan_rechecks_candidate_capacity_and_overdue_state() -> None:
+    department_id = ObjectId()
+    current_employee = make_employee(department_id)
+    candidate = make_employee(department_id)
+    repository = FakeTaskRepository([current_employee, candidate])
+    service = TaskService(
+        repository, clock=FixedBusinessClock(datetime(2026, 9, 6, tzinfo=timezone.utc))
+    )
+    overdue = await service.create(
+        task_request(current_employee.id, due_date=date(2020, 1, 1)),
+        department_id,
+        str(ObjectId()),
+    )
+    await service.create(
+        task_request(candidate.id, title="Việc ứng viên đã quá hạn", due_date=date(2020, 1, 1)),
+        department_id,
+        str(ObjectId()),
+    )
+
+    with pytest.raises(HTTPException) as conflict:
+        await service.update(
+            overdue.id,
+            TaskUpdate(
+                employee_id=str(candidate.id),
+                expected_updated_at=overdue.updated_at,
+                planning_version="plan-version",
+            ),
+            department_id,
+        )
+
+    assert conflict.value.status_code == 409
+    assert "tải lại đề xuất" in conflict.value.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_due_date", [None, date(2026, 9, 6)])
+async def test_applying_ai_plan_rejects_a_past_or_missing_new_deadline(
+    new_due_date: date | None,
+) -> None:
+    department_id = ObjectId()
+    current_employee = make_employee(department_id)
+    candidate = make_employee(department_id)
+    repository = FakeTaskRepository([current_employee, candidate])
+    service = TaskService(
+        repository, clock=FixedBusinessClock(datetime(2026, 9, 6, tzinfo=timezone.utc))
+    )
+    overdue = await service.create(
+        task_request(current_employee.id, due_date=date(2020, 1, 1)),
+        department_id,
+        str(ObjectId()),
+    )
+    update = {
+        "employee_id": str(candidate.id),
+        "expected_updated_at": overdue.updated_at,
+        "planning_version": "safe-plan",
+    }
+    if new_due_date is not None:
+        update["due_date"] = new_due_date
+
+    with pytest.raises(HTTPException) as conflict:
+        await service.update(overdue.id, TaskUpdate(**update), department_id)
+
+    assert conflict.value.status_code == 409
+    assert "hạn hoàn thành mới" in conflict.value.detail
 
 
 @pytest.mark.asyncio
@@ -374,6 +460,96 @@ async def test_leadership_overview_groups_risk_by_department_without_employee_fi
     assert "employee_id" not in portfolio.model_dump()["overdue"][0]
     assert "employee_name" not in portfolio.model_dump()["overdue"][0]
 
+    not_directed = await service.department_portfolio(str(department_id), "30d", "not_directed")
+    assert [item.title for item in not_directed.overdue] == ["Việc quá hạn"]
+
+
+@pytest.mark.asyncio
+async def test_accepted_directive_does_not_hide_reopened_overdue_task() -> None:
+    department_id = ObjectId()
+    employee = make_employee(department_id)
+    repository = FakeTaskRepository([employee])
+    repository.departments[department_id] = make_department(department_id)
+    manager = make_manager(department_id)
+    repository.users[manager.id] = manager
+    service = TaskService(repository)
+
+    task = await service.create(
+        task_request(employee.id, title="Công việc mở lại", due_date=date(2020, 1, 1)),
+        department_id,
+        str(manager.id),
+    )
+    directive = await service.issue_department_directive(
+        str(department_id),
+        str(ObjectId()),
+        IssueDepartmentTaskDirectiveRequest(focus=TaskDirectiveFocus.OVERDUE),
+    )
+    directive_object_id = ObjectId(directive.id)
+    repository.directives[directive_object_id] = repository.directives[
+        directive_object_id
+    ].model_copy(update={"status": DepartmentTaskDirectiveStatus.ACCEPTED})
+    task_object_id = ObjectId(task.id)
+    repository.documents[task_object_id] = repository.documents[task_object_id].model_copy(
+        update={"status": TaskStatus.TODO, "completed_at": None}
+    )
+
+    overview = await service.leadership_overview("30d")
+    portfolio = await service.department_portfolio(str(department_id), "30d", "not_directed")
+    reissued = await service.issue_department_directive(
+        str(department_id),
+        str(ObjectId()),
+        IssueDepartmentTaskDirectiveRequest(focus=TaskDirectiveFocus.OVERDUE),
+    )
+
+    assert overview.departments[0].undirected_overdue_count == 1
+    assert [item.title for item in portfolio.overdue] == ["Công việc mở lại"]
+    assert portfolio.overdue[0].directive_status == "accepted"
+    assert portfolio.overdue[0].has_active_directive is False
+    assert reissued.id != directive.id
+    assert reissued.status == DepartmentTaskDirectiveStatus.PENDING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_status", sorted(ACTIVE_DIRECTIVE_STATUSES))
+async def test_active_directive_status_still_hides_task_from_new_directive(
+    active_status: str,
+) -> None:
+    department_id = ObjectId()
+    employee = make_employee(department_id)
+    repository = FakeTaskRepository([employee])
+    repository.departments[department_id] = make_department(department_id)
+    manager = make_manager(department_id)
+    repository.users[manager.id] = manager
+    service = TaskService(repository)
+
+    await service.create(
+        task_request(employee.id, title="Công việc đang xử lý", due_date=date(2020, 1, 1)),
+        department_id,
+        str(manager.id),
+    )
+    directive = await service.issue_department_directive(
+        str(department_id),
+        str(ObjectId()),
+        IssueDepartmentTaskDirectiveRequest(focus=TaskDirectiveFocus.OVERDUE),
+    )
+    directive_object_id = ObjectId(directive.id)
+    repository.directives[directive_object_id] = repository.directives[
+        directive_object_id
+    ].model_copy(update={"status": DepartmentTaskDirectiveStatus(active_status)})
+
+    overview = await service.leadership_overview("30d")
+    portfolio = await service.department_portfolio(str(department_id), "30d", "not_directed")
+    repeated = await service.issue_department_directive(
+        str(department_id),
+        str(ObjectId()),
+        IssueDepartmentTaskDirectiveRequest(focus=TaskDirectiveFocus.OVERDUE),
+    )
+
+    assert overview.departments[0].undirected_overdue_count == 0
+    assert portfolio.overdue == []
+    assert repeated.id == directive.id
+    assert len(repository.directives) == 1
+
 
 @pytest.mark.asyncio
 async def test_department_task_directive_selects_new_tasks_and_manager_acknowledges() -> None:
@@ -409,6 +585,7 @@ async def test_department_task_directive_selects_new_tasks_and_manager_acknowled
     portfolio = await service.department_portfolio(str(department_id), "30d", "all")
     assert portfolio.overdue[0].directive_id == str(directive.id)
     assert portfolio.overdue[0].directive_status == "pending"
+    assert portfolio.overdue[0].has_active_directive is True
     repeated = await service.issue_department_directive(
         str(department_id),
         str(leadership_id),
@@ -470,6 +647,47 @@ async def test_pending_task_directive_accepts_new_matching_tasks_without_duplica
     assert merged.selected_task_count == 2
     assert len(repository.directives) == 1
     assert repository.audits[-1]["action"] == "department_task_directive_tasks_appended"
+
+
+@pytest.mark.asyncio
+async def test_append_directive_duplicate_returns_vietnamese_409_instead_of_500() -> None:
+    department_id = ObjectId()
+    employee = make_employee(department_id)
+    repository = AppendDuplicateTaskRepository([employee])
+    department = make_department(department_id)
+    manager = make_manager(department_id)
+    repository.departments[department_id] = department
+    repository.users[manager.id] = manager
+    service = TaskService(repository)
+    leadership_id = ObjectId()
+
+    first_task = await service.create(
+        task_request(employee.id, title="Công việc quá hạn 1", due_date=date(2020, 1, 1)),
+        department_id,
+        str(manager.id),
+    )
+    await service.issue_department_directive(
+        str(department_id),
+        str(leadership_id),
+        IssueDepartmentTaskDirectiveRequest(focus=TaskDirectiveFocus.OVERDUE, task_ids=[first_task.id]),
+    )
+    second_task = await service.create(
+        task_request(employee.id, title="Công việc quá hạn 2", due_date=date(2020, 1, 1)),
+        department_id,
+        str(manager.id),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await service.issue_department_directive(
+            str(department_id),
+            str(leadership_id),
+            IssueDepartmentTaskDirectiveRequest(
+                focus=TaskDirectiveFocus.OVERDUE, task_ids=[second_task.id]
+            ),
+        )
+
+    assert error.value.status_code == 409
+    assert "vui lòng tải lại" in error.value.detail
 
 
 @pytest.mark.asyncio
@@ -583,8 +801,19 @@ async def test_task_directive_requires_completion_before_submit_and_can_be_accep
         str(manager.id),
         SubmitDepartmentTaskDirectiveRequest(completion_note="Đã hoàn tất."),
     )
-    accepted = await service.accept_department_directive(
+    revised = await service.request_department_directive_revision(
         submitted.id,
+        str(ObjectId()),
+        ReviewDepartmentTaskDirectiveRequest(note="Bổ sung bằng chứng."),
+    )
+    resubmitted = await service.submit_department_directive(
+        revised.id,
+        department_id,
+        str(manager.id),
+        SubmitDepartmentTaskDirectiveRequest(completion_note="Đã bổ sung."),
+    )
+    accepted = await service.accept_department_directive(
+        resubmitted.id,
         str(ObjectId()),
         ReviewDepartmentTaskDirectiveRequest(note="Đã nghiệm thu."),
     )
@@ -592,4 +821,6 @@ async def test_task_directive_requires_completion_before_submit_and_can_be_accep
     assert submitted.status.value == "submitted"
     assert submitted.progress_percent == 100
     assert accepted.status.value == "accepted"
+    assert accepted.acknowledged_at is not None
+    assert accepted.acknowledged_at == revised.acknowledged_at
     assert repository.documents[stored_task_id].status == TaskStatus.DONE
