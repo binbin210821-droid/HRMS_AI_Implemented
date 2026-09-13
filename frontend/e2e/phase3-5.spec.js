@@ -72,12 +72,13 @@ test('Leadership thực hiện CRUD phòng ban cơ bản', async ({ page }) => {
   await page.getByLabel('Mã phòng ban').fill(code)
   await page.getByLabel('Mô tả').fill('Phòng ban phục vụ kiểm thử E2E')
   await page.getByRole('button', { name: 'Lưu phòng ban' }).click()
+  await page.getByRole('button', { name: 'Xác nhận thêm', exact: true }).click()
 
   const row = page.getByRole('row').filter({ hasText: code })
   await expect(row).toContainText(name)
 
-  page.on('dialog', (dialog) => dialog.accept())
   await row.getByRole('button', { name: 'Xóa' }).click()
+  await page.getByRole('button', { name: 'Xóa phòng ban', exact: true }).click()
   await expect(page.getByRole('row').filter({ hasText: code })).toHaveCount(0)
 })
 
