@@ -456,39 +456,6 @@ latency, MongoDB/Redis connection errors, S3 failures và ClamAV unavailable.
 - Giới hạn SSH theo IP/VPN hoặc dùng AWS Systems Manager khi phù hợp.
 - Cập nhật dependency, review CodeQL/Dependency Review và rotate credential định kỳ.
 
-## Production readiness
-
-Hoàn thành checklist này trước khi mời người dùng thật:
-
-- [ ] Domain DNS trỏ đúng Elastic IP hoặc load balancer.
-- [ ] HTTPS hoạt động; HTTP redirect về HTTPS.
-- [ ] APP_URL và CORS_ORIGINS dùng domain HTTPS thật.
-- [ ] Security Group chỉ mở các port cần thiết; SSH được giới hạn nguồn truy cập.
-- [ ] Không còn tài khoản demo hoặc mật khẩu development trong production.
-- [ ] MongoDB backup đã bật và đã thử restore trên môi trường riêng.
-- [ ] MongoDB user chỉ có quyền cần thiết trên database hrms.
-- [ ] Redis production có TLS/auth phù hợp và đã kiểm tra từ EC2.
-- [ ] S3 bucket private, IAM least privilege và Versioning/lifecycle đã cấu hình.
-- [ ] ClamAV hoạt động nếu hệ thống cho phép upload evidence.
-- [ ] CloudWatch/log aggregation và cảnh báo downtime đã cấu hình.
-- [ ] Migration production đã chạy sau backup và có ghi nhận kết quả.
-- [ ] Đã kiểm tra đăng nhập, logout, RBAC, CSRF, realtime, upload và nghiệp vụ chính.
-- [ ] Đã kiểm tra bằng browser thật từ Internet.
-- [ ] Đã thử rollback về release trước.
-- [ ] Đã bổ sung LICENSE nếu dự án được phân phối cho bên ngoài.
-
-## Đóng góp
-
-1. Tạo branch theo phạm vi thay đổi.
-2. Không trộn nhiều module nghiệp vụ trong một pull request nếu không cần thiết.
-3. Thêm hoặc cập nhật test cho hành vi thay đổi.
-4. Chạy quality gates liên quan trước khi push.
-5. Mô tả rõ route, schema, migration, dữ liệu và rủi ro bảo mật bị ảnh hưởng.
-6. Chờ required checks và reviewer approval trước khi merge.
-
-Các thay đổi ngoài phạm vi hiện tại nên được ghi vào backlog thay vì triển khai chen vào luồng
-đang phát triển.
-
 ## Tài liệu liên quan
 
 - [CI/CD deployment guide](docs/deployment/ci-cd.md)
@@ -496,7 +463,3 @@ Các thay đổi ngoài phạm vi hiện tại nên được ghi vào backlog th
 - [Backend tests](backend/tests)
 - [Frontend E2E tests](frontend/e2e)
 
-## License
-
-Repository hiện chưa chứa file LICENSE. Hãy bổ sung license phù hợp trước khi phân phối hoặc
-sử dụng project trong phạm vi có yêu cầu pháp lý.
