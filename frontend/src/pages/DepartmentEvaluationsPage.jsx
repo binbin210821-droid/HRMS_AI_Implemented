@@ -427,9 +427,10 @@ function DepartmentEvaluationsPage() {
           </div>
 
           <div className="mt-6 grid gap-4 rounded-2xl bg-slate-50 p-4 md:grid-cols-2">
-            <label className="text-sm font-semibold text-slate-700">
+            <label htmlFor="department" className="text-sm font-semibold text-slate-700">
               Phòng ban
               <Select
+                id="department"
                 className="mt-1"
                 value={departmentId}
                 onChange={(event) => {
@@ -446,9 +447,10 @@ function DepartmentEvaluationsPage() {
                 ))}
               </Select>
             </label>
-            <label className="text-sm font-semibold text-slate-700">
+            <label htmlFor="week-start" className="text-sm font-semibold text-slate-700">
               Thứ Hai bắt đầu tuần
               <Input
+                id="week-start"
                 className="mt-1"
                 type="date"
                 value={weekStart}
