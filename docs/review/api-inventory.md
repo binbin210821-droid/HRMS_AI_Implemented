@@ -12,7 +12,7 @@ Không tìm thấy frontend gọi URL không có route backend tương ứng. C�
 |---|---|---|---|---|---|
 | `/api/auth/login` | POST | `frontend/src/pages/LoginPage.jsx`, `frontend/src/stores/authStore.js` | Đang dùng | Công khai; service kiểm tra tài khoản | `AuthenticationService.login` đọc `UserRepository`, phát JWT; không cần scope. |
 | `/api/auth/me` | GET | Không tìm thấy caller runtime; không tìm thấy caller nào khác trong frontend. | Không dùng | Bearer hợp lệ | Route tồn tại và được route check xác nhận; frontend hiện dùng claims trong token/Zustand thay vì gọi lại `/me`. |
-| `/api/health` | GET | `frontend/src/components/HealthStatus.jsx` qua `useHealth.js` | Đang dùng | Công khai | `HealthService` kiểm tra Mongo và trả trạng thái/thời điểm; không phải nghiệp vụ Manager/Leadership. |
+| `/api/v1/health` | GET | `frontend/src/features/health/healthApi.js` qua `useHealth.js` | Đang dùng | Công khai | `HealthService` kiểm tra Mongo và trả trạng thái/thời điểm; `/api/health` vẫn là alias compatibility; không phải nghiệp vụ Manager/Leadership. |
 
 ## Alerts
 

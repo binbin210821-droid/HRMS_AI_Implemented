@@ -23,7 +23,8 @@ security_schemes = openapi["components"]["securitySchemes"]
 assert security_schemes["CookieAuth"]["in"] == "cookie"
 assert security_schemes["BearerAuth"]["scheme"] == "bearer"
 assert security_schemes["BearerAuth"]["description"].startswith("Deprecated")
-assert "/api/health" in paths
+assert "/api/v1/health" in paths
+assert "/api/health" in paths  # compatibility alias vẫn phải tồn tại
 assert "/api/auth/login" in paths
 assert "/api/auth/me" in paths
 assert "/api/auth/logout" in paths
