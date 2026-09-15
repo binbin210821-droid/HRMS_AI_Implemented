@@ -299,11 +299,11 @@ test('UI-only giữ redirect trang chủ và trang không có quyền', async ({
   ).toEqual([])
 })
 
-test('UI-only Trợ lý AI vẫn được ẩn sau khi tạm hoãn tính năng', async ({ page }) => {
+test('UI-only Trợ lý AI hiển thị nút mở nhưng panel đóng ban đầu', async ({ page }) => {
   const { consoleErrors } = await installReadOnlyApi(page, 'manager')
   await page.goto('/manager')
 
-  await expect(page.getByRole('button', { name: 'Mở Trợ lý AI' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Mở Trợ lý AI' })).toBeVisible()
   await expect(page.locator('section[aria-label="Trợ lý AI"]')).toHaveCount(0)
   await expect(page.getByRole('link', { name: 'Trợ lý AI' })).toHaveCount(0)
 
