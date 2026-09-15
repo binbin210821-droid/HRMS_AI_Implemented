@@ -15,6 +15,7 @@ from app.models.task_planning import (
     TaskActionOption,
     TaskActionType,
 )
+from app.models.user import UserRole
 from app.services.ai_service import AiService
 
 
@@ -60,6 +61,11 @@ class SlowSummaryFactory:
         self.calls += 1
         await asyncio.sleep(0.01)
         yield "Tóm tắt dùng chung cho các tab."
+
+
+class FixedClock:
+    def today(self) -> date:
+        return date(2026, 9, 15)
 
 
 class ProposalFactory:
@@ -211,6 +217,68 @@ async def test_ai_service_passes_scoped_vietnamese_context_and_sanitizes_stream(
     assert "tasks_completed" not in result
     assert "Số công việc hoàn thành" in result
     assert "Điểm chất lượng công việc" in result
+
+
+@pytest.mark.asyncio
+async def test_ai_service_answers_current_date_without_provider_guessing() -> None:
+    factory = CapturingFactory()
+    service = AiService(
+        EmptyPerformanceRepository(),
+        EmptyAlertRepository(),
+        EmptyOverloadRepository(),
+        factory,
+        clock=FixedClock(),
+    )
+
+    result = "".join(
+        [chunk async for chunk in service.stream_response("Hôm nay là ngày mấy?", None)]
+    )
+
+    assert result == "Hôm nay là 15/09/2026."
+    assert factory.prompt == ""
+
+
+@pytest.mark.asyncio
+async def test_ai_service_answers_authenticated_role_without_provider_guessing() -> None:
+    factory = CapturingFactory()
+    service = AiService(
+        EmptyPerformanceRepository(),
+        EmptyAlertRepository(),
+        EmptyOverloadRepository(),
+        factory,
+    )
+
+    result = "".join(
+        [
+            chunk
+            async for chunk in service.stream_response(
+                "Tôi đang sử dụng chức vụ nào?", None, role=UserRole.MANAGER
+            )
+        ]
+    )
+
+    assert result == "Bạn đang sử dụng vai trò Quản lý phòng ban."
+    assert factory.prompt == ""
+
+
+@pytest.mark.asyncio
+async def test_ai_service_prompt_allows_general_knowledge_without_leaking_hrms_scope() -> None:
+    factory = CapturingFactory()
+    service = AiService(
+        EmptyPerformanceRepository(),
+        EmptyAlertRepository(),
+        EmptyOverloadRepository(),
+        factory,
+    )
+
+    result = "".join(
+        [chunk async for chunk in service.stream_response("Giải thích vì sao có cầu vồng?", None)]
+    )
+
+    assert result
+    assert "kiến thức phổ thông" in factory.prompt
+    assert "không trả lời máy móc rằng chưa có dữ liệu" in factory.prompt
+    assert "thời tiết, giá cả hoặc tin tức" in factory.prompt
 
 
 @pytest.mark.asyncio

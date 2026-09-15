@@ -613,9 +613,15 @@ class AiService:
             marker = ""
         return (
             f"{marker}Bạn là Trợ lý AI của hệ thống quản lý hiệu suất. Hãy trả lời bằng tiếng Việt phổ thông, "
-            "ngắn gọn và có gợi ý hành động cụ thể nếu phù hợp. Chỉ sử dụng dữ liệu trong phạm vi "
-            "được cung cấp. Không được nhắc đến tên trường kỹ thuật, mã nội bộ hoặc thông tin ngoài "
-            "phạm vi. Nếu dữ liệu chưa đủ, hãy nói rõ là chưa có dữ liệu. "
+            "ngắn gọn và có gợi ý hành động cụ thể nếu phù hợp. Hãy phân loại câu hỏi trước khi trả lời: "
+            "với câu hỏi về hiệu suất, cảnh báo, quá tải, công việc hoặc dữ liệu HRMS, chỉ sử dụng dữ liệu "
+            "đã được cung cấp trong đúng phạm vi quyền; không suy đoán dữ liệu nghiệp vụ còn thiếu. "
+            "Với câu hỏi hội thoại thông thường hoặc kiến thức phổ thông không cần dữ liệu HRMS, hãy tự "
+            "trả lời tự nhiên bằng kiến thức của mô hình, không trả lời máy móc rằng chưa có dữ liệu. "
+            "Với thông tin cần dữ liệu thời gian thực như thời tiết, giá cả hoặc tin tức, không được bịa; "
+            "hãy nói rõ giới hạn hiện tại và hỏi thêm địa điểm/thời điểm nếu cần tích hợp nguồn dữ liệu. "
+            "Không được nhắc đến tên trường kỹ thuật, mã nội bộ hoặc thông tin nhân sự ngoài phạm vi. "
+            "Nếu câu hỏi HRMS thiếu dữ liệu cần thiết, hãy nói rõ là chưa có dữ liệu. "
             + (
                 "Với bản tóm tắt Dashboard, bắt buộc trình bày theo bốn mục: Tổng quan, "
                 "Tình trạng vận hành, Xu hướng gần đây và Gợi ý hành động; mỗi mục ở một dòng riêng. "
@@ -640,6 +646,20 @@ class AiService:
         refresh: bool = False,
         role: UserRole | None = None,
     ) -> AsyncIterator[str]:
+        simple_answer = self._simple_chat_answer(message, role)
+        if simple_answer is not None:
+            await self._audit(
+                actor_id,
+                scope,
+                "chat",
+                message,
+                simple_answer,
+                "success",
+                {"mode": mode, "deterministic": True},
+            )
+            yield simple_answer
+            return
+
         prompt = await self._build_chat_prompt(message, scope, mode, role)
         summary_key = None
         if mode == "summary" and actor_id:
@@ -678,6 +698,44 @@ class AiService:
             pass
         await self._audit(actor_id, scope, "chat", message, "", "fallback")
         yield SAFE_AI_FALLBACK_MESSAGE
+
+    def _simple_chat_answer(
+        self, message: str, role: UserRole | None
+    ) -> str | None:
+        """Answer safe, factual session questions without asking the model to guess."""
+
+        normalized = message.casefold().strip()
+        if (
+            "hôm nay" in normalized
+            and any(
+                marker in normalized
+                for marker in ("ngày mấy", "ngày bao nhiêu", "thứ mấy")
+            )
+        ):
+            current_date = self.clock.today()
+            return (
+                f"Hôm nay là {current_date.day:02d}/{current_date.month:02d}/"
+                f"{current_date.year}."
+            )
+
+        if any(
+            marker in normalized
+            for marker in (
+                "chức vụ nào",
+                "chức vụ của tôi",
+                "vai trò nào",
+                "vai trò của tôi",
+            )
+        ):
+            role_labels = {
+                UserRole.MANAGER: "Quản lý phòng ban",
+                UserRole.LEADERSHIP: "Lãnh đạo",
+            }
+            role_label = role_labels.get(role)
+            if role_label is not None:
+                return f"Bạn đang sử dụng vai trò {role_label}."
+
+        return None
 
     async def stream_grounded_response(
         self,
