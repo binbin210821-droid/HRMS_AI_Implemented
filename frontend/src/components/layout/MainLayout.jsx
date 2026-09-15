@@ -5,7 +5,6 @@ import { useLocation } from 'react-router-dom'
 import Header from './Header.jsx'
 import Sidebar from './Sidebar.jsx'
 import { PageTransition } from '../animations/index.js'
-import AiAssistantWidget from '../../features/ai/AiAssistantWidget.jsx'
 
 function MainLayout({ children }) {
   const location = useLocation()
@@ -24,7 +23,6 @@ function MainLayout({ children }) {
           <PageTransition key={location.pathname}>{children}</PageTransition>
         </AnimatePresence>
       </main>
-      <AiAssistantWidget />
     </div>
   )
 }

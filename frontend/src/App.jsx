@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 
 import ProtectedRoute from './components/ProtectedRoute.jsx'
+import AiAssistantWidget from './features/ai/AiAssistantWidget.jsx'
 import { useAuthStore } from './stores/authStore.js'
 
 const AlertsPage = lazy(() => import('./pages/AlertsPage.jsx'))
@@ -25,6 +26,7 @@ function App() {
 
   return (
     <BrowserRouter>
+      <AiAssistantWidget />
       <Suspense fallback={<p className="p-6 text-sm text-ink-600">Đang tải trang...</p>}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
