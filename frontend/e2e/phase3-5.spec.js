@@ -175,8 +175,10 @@ test('Leadership xem màn hình đánh giá phòng ban theo tuần', async ({ pa
 
   await expect(page).toHaveURL(/\/leadership\/department-evaluations$/)
   await expect(page.getByRole('heading', { name: 'Đánh giá phòng ban theo tuần' })).toBeVisible()
-  await expect(page.getByLabel('Phòng ban', { exact: true })).toBeVisible()
-  await expect(page.getByLabel('Thứ Hai bắt đầu tuần')).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'Phòng ban', exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('textbox', { name: 'Thứ Hai bắt đầu tuần', exact: true }),
+  ).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Lịch sử đánh giá tuần' })).toBeVisible()
 })
 
