@@ -731,7 +731,7 @@ class AiService:
                 UserRole.MANAGER: "Quản lý phòng ban",
                 UserRole.LEADERSHIP: "Lãnh đạo",
             }
-            role_label = role_labels.get(role)
+            role_label = role_labels.get(role) if role is not None else None
             if role_label is not None:
                 return f"Bạn đang sử dụng vai trò {role_label}."
 
