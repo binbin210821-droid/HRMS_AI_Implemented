@@ -31,6 +31,11 @@ class WorkloadCandidateResponse(BaseModel):
     employee_name: str
     tasks_completed: int
     quality_score: float
+    active_task_count: int = Field(default=0, ge=0)
+    active_task_titles: list[str] = Field(default_factory=list)
+    reserved_coordination_count: int = Field(default=0, ge=0)
+    workload_count: int | None = Field(default=None, ge=0)
+    available_capacity: int | None = Field(default=None, ge=0)
 
 
 class OverloadLogResponse(BaseModel):

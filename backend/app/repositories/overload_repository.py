@@ -10,6 +10,7 @@ from app.core.pagination import Page, paginate_aggregate
 from app.models.employee import EmployeeDocument
 from app.models.overload import OverloadLogDocument, WorkloadCandidateResponse
 from app.models.performance import PerformanceMetricDocument
+from app.repositories.workload_candidate_query import build_rebalance_candidate_pipeline
 
 
 class OverloadRepository:
@@ -18,6 +19,8 @@ class OverloadRepository:
     def __init__(self, database: AsyncIOMotorDatabase) -> None:
         self.logs = database["overload_logs"]
         self.metrics = database["performance_metrics"]
+        self.tasks = database["tasks"]
+        self.plans = database["coordination_plans"]
         self.employees = database["employees"]
 
     async def ensure_indexes(self) -> None:
@@ -25,6 +28,9 @@ class OverloadRepository:
             [("employee_id", 1), ("date", 1), ("trigger_reason", 1)], unique=True
         )
         await self.logs.create_index([("department_id", 1), ("date", -1)])
+        await self.metrics.create_index([("employee_id", 1), ("date", 1)])
+        await self.tasks.create_index([("employee_id", 1), ("status", 1), ("created_at", 1)])
+        await self.plans.create_index([("target_employee_id", 1), ("alert_date", 1)])
 
     async def list_employees(self, department_id: ObjectId | None) -> list[EmployeeDocument]:
         query = {"department_id": department_id} if department_id is not None else {}
@@ -138,43 +144,8 @@ class OverloadRepository:
         metric_date: Date,
         excluded_employee_id: ObjectId | None = None,
     ) -> list[WorkloadCandidateResponse]:
-        start = datetime.combine(metric_date, time.min, tzinfo=timezone.utc)
-        end = start + timedelta(days=1)
-        match: dict[str, Any] = {
-            "date": {"$gte": start, "$lt": end},
-            "tasks_completed": {"$lte": 2},
-            "quality_score": {"$gte": 80},
-        }
-        if excluded_employee_id is not None:
-            match["employee_id"] = {"$ne": excluded_employee_id}
-        pipeline: list[dict[str, Any]] = [
-            {"$match": match},
-            {
-                "$lookup": {
-                    "from": "employees",
-                    "localField": "employee_id",
-                    "foreignField": "_id",
-                    "as": "employee",
-                }
-            },
-            {"$unwind": "$employee"},
-            {
-                "$match": {
-                    "employee.department_id": department_id,
-                    "employee.is_active": True,
-                }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "employee_id": {"$toString": "$employee_id"},
-                    "employee_code": "$employee.employee_code",
-                    "employee_name": "$employee.full_name",
-                    "tasks_completed": 1,
-                    "quality_score": 1,
-                }
-            },
-            {"$sort": {"tasks_completed": 1, "quality_score": -1}},
-        ]
+        pipeline = build_rebalance_candidate_pipeline(
+            department_id, metric_date, excluded_employee_id
+        )
         documents = await self.metrics.aggregate(pipeline).to_list(None)
         return [WorkloadCandidateResponse.model_validate(document) for document in documents]

@@ -26,6 +26,18 @@ describe('calendar utilities', () => {
     expect(grouped['2026-09-02']).toEqual([task])
   })
 
+  it('shows a multi-day task on every date from start through due date', () => {
+    const task = {
+      id: 'task-2',
+      created_at: '2026-09-02T08:00:00Z',
+      due_date: '2026-09-05',
+    }
+    const grouped = groupTasksByDate([task])
+
+    expect(Object.keys(grouped)).toEqual(['2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05'])
+    expect(grouped['2026-09-03']).toEqual([task])
+  })
+
   it('moves month, week and day views by the expected amount', () => {
     const date = new Date(2026, 8, 2)
 

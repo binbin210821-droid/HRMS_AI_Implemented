@@ -21,12 +21,12 @@ flowchart LR
 
 Bằng chứng: `README.md`, `docker-compose.yml`, `docker-compose.production.yml`, `frontend/nginx.conf`, `backend/app/main.py`, `backend/app/events/event_bus.py`, `backend/app/realtime/change_stream_worker.py`, `backend/app/realtime/connection_manager.py`, `backend/app/ai/providers.py`, `.github/workflows/cd.yml`.
 
-Trong sơ đồ, nhánh `MongoDB Change Streams → EventBus → WebSocket` thể hiện các topic realtime. Alert/Overload handlers được kích hoạt qua domain events riêng (`PERFORMANCE_METRIC_CREATED` và `OVERLOAD_DETECTED`) do luồng nghiệp vụ hiệu suất/quá tải phát ra; không hiểu sơ đồ là Change Stream gọi trực tiếp detector. Nhãn Atlas là production target theo cấu hình, chưa phải xác nhận runtime connection trong audit này.
+Trong sơ đồ, nhánh `MongoDB Change Streams → EventBus → WebSocket` thể hiện các topic realtime. Alert/Overload handlers được kích hoạt qua domain events riêng (`PERFORMANCE_METRIC_CREATED` và `OVERLOAD_DETECTED`) do luồng nghiệp vụ hiệu suất/quá tải phát ra; không hiểu sơ đồ là Change Stream gọi trực tiếp detector. Backend production đã được xác nhận trỏ đúng MongoDB Atlas; cluster/user/network values không lưu trong repo.
 
 ## 2. Luồng triển khai
 
 - **Local:** Docker Compose chạy MongoDB replica set, Redis và MinIO; backend Uvicorn ở `127.0.0.1:8000`; frontend Vite ở `127.0.0.1:5173`.
-- **Production hiện tại:** GHCR giữ backend/frontend image; `cd.yml` SSH tới `SSH_HOST`, chạy `docker compose -f docker-compose.production.yml pull/up`; frontend publish port `${FRONTEND_PORT:-80}`, backend chỉ `expose: 8000`; health check chuẩn chạy nội bộ `http://127.0.0.1/api/v1/health`. Alias `http://127.0.0.1/api/health` vẫn tồn tại để tương thích. AWS, S3 bucket, Redis production configuration và CI/CD success đã được xác nhận ngoài repo theo evidence runtime của chủ dự án. `.env.production` có connection target MongoDB Atlas, nhưng kết nối Atlas thực tế chưa được kiểm thử trong audit này.
+- **Production hiện tại:** GHCR giữ backend/frontend image; `cd.yml` SSH tới `SSH_HOST`, chạy `docker compose -f docker-compose.production.yml pull/up`; frontend publish port `${FRONTEND_PORT:-80}`, backend chỉ `expose: 8000`; health check chuẩn chạy nội bộ `http://127.0.0.1/api/v1/health`. Alias `http://127.0.0.1/api/health` vẫn tồn tại để tương thích. AWS, S3 bucket, Redis production configuration, MongoDB Atlas target và CI/CD success đã được xác nhận theo evidence runtime của chủ dự án. Giá trị URI/cluster/user/network cụ thể không lưu trong repo.
 - **AWS:** workflow không hard-code AWS service/account/region và không dùng ECR, Kubernetes hoặc CloudWatch action. `SSH_HOST` là secret generic trong repo; runtime hiện tại đã được xác nhận thủ công là EC2. AWS account/region/Elastic IP/security group/CloudWatch vẫn chưa được lưu trong repo.
 
 ## 3. API routing và compatibility
@@ -70,7 +70,7 @@ Hiện tại `CloudflareProvider`, `CloudflareToolProvider` và `CloudflareEmbed
 | AWS account/region | AWS đã được cấu hình cho môi trường production; account/region không có trong source | `<AWS_ACCOUNT_ID>`, `<AWS_REGION>` |
 | Compute | SSH target runtime đã được xác nhận là EC2; instance ID/hostname cụ thể không có trong source | `<EC2_INSTANCE_ID>`, `<ELASTIC_IP_OR_HOSTNAME>` |
 | Reverse proxy/TLS | Nginx image có; domain chưa cấu hình | `<PUBLIC_HTTPS_ORIGIN>` |
-| MongoDB | `.env.production` có connection target MongoDB Atlas; kết nối runtime, cluster/database user và Network Access cụ thể chưa được xác minh trong source/audit | `<ATLAS_CLUSTER>`, `<DATABASE_USER>` |
+| MongoDB | Backend production đã được xác nhận trỏ MongoDB Atlas; cluster/database user cụ thể không có trong source | `<ATLAS_CLUSTER>`, `<DATABASE_USER>` |
 | S3 bucket | S3 bucket AWS production đã được cấu hình; tên bucket/region cụ thể không có trong source | `<S3_BUCKET>`, `<S3_REGION>` |
 | Redis | `.env.production` đã xác nhận `RATE_LIMIT_BACKEND=redis`; URI/cloud service cụ thể không có trong source | `<REDIS_TLS_URL>` |
 | AI Worker | Không sử dụng custom AI Worker trong kiến trúc hiện tại; FastAPI gọi trực tiếp Cloudflare Workers AI API | Không áp dụng hiện tại; chỉ điền `<WORKER_URL>` nếu sau này tách custom Worker |
@@ -83,14 +83,57 @@ Các ảnh dưới đây dùng để chứng minh kiến trúc và triển khai 
 | Mã | Phần kiến trúc | Ảnh minh chứng nên bổ sung | Mục đích xác nhận | Trạng thái |
 |---|---|---|---|---|
 | ARCH-01 | Mục 1 — Sơ đồ kiến trúc | Sơ đồ hoặc ảnh production gồm frontend/Nginx, FastAPI, MongoDB Atlas, Redis, S3 và Cloudflare Workers AI | Xác nhận các node và boundary triển khai thực tế | Cần bổ sung ảnh topology; sơ đồ Mermaid đã có trong tài liệu |
-| ARCH-02 | Mục 2 — Local/production deployment | Terminal EC2 hiển thị `hostname`, `docker ps`, `docker compose ps` thành công và `curl http://127.0.0.1/api/v1/health` | Xác nhận môi trường EC2, container production và health check chuẩn | Đã xác minh runtime; cần lưu ảnh lệnh thành công |
+| ARCH-02 | Mục 2 — Local/production deployment | Terminal EC2 hiển thị `hostname`, `docker ps`, container frontend/backend, `ss -lntp` cho port 80 và `curl http://127.0.0.1:80/api/v1/health` | Xác nhận môi trường EC2, Nginx frontend proxy và health check chuẩn qua port 80 | Chưa hoàn tất: cần bổ sung ảnh; health check qua `127.0.0.1:80` đang cần kiểm tra |
 | ARCH-03 | Mục 2 — CI/CD | GitHub Actions run hiển thị publish GHCR, deploy production và health check thành công | Xác nhận luồng GitHub Actions → GHCR → SSH/EC2 | Đã xác minh workflow; cần lưu run URL hoặc ảnh |
 | ARCH-04 | Mục 3 — API routing | `/docs` hoặc `/openapi.json` hiển thị route `/api/v1/*`, kèm ảnh response có `X-Request-ID` nếu cần | Xác nhận contract v1 và request tracing | Cần bổ sung ảnh runtime |
 | ARCH-05 | Mục 4 — Auth/CORS/cookie | DevTools hoặc response headers hiển thị HttpOnly cookie, CSRF cookie/header, CORS origin cụ thể và không dùng wildcard | Xác nhận security behavior ngoài source/config | Chưa có ảnh runtime đầy đủ |
 | ARCH-06 | Mục 5 — Realtime | Terminal log hoặc browser DevTools cho thấy WebSocket `/ws/realtime` kết nối thành công và nhận event đúng scope | Xác nhận Change Stream → EventBus → WebSocket end-to-end | Cần kiểm thử/ảnh runtime |
 | ARCH-07 | Mục 6 — AI boundary | Cloudflare Workers AI Dashboard hiển thị usage Gemma/Qwen và health response hiển thị `ai_provider=cloudflare` | Xác nhận FastAPI gọi trực tiếp Cloudflare API, không qua custom Worker | Đã có bằng chứng dashboard/health; không phải failure-path test |
-| ARCH-08 | Mục 7 — Hạ tầng | AWS EC2, S3 Console, MongoDB Atlas và Redis configuration đã che secret | Xác nhận các dịch vụ production đã cấu hình; không dùng ảnh để lộ credential | AWS/S3/Redis đã được xác nhận theo thông tin cung cấp; MongoDB Atlas mới xác nhận connection target, cần ảnh Atlas redacted và runtime smoke test |
+| ARCH-08 | Mục 7 — Hạ tầng | AWS EC2, S3 Console, MongoDB Atlas và Redis configuration đã che secret | Xác nhận các dịch vụ production đã cấu hình; không dùng ảnh để lộ credential | AWS/S3/Redis và Backend production → MongoDB Atlas đã được xác nhận theo thông tin cung cấp; chỉ lưu ảnh Atlas redacted làm evidence, không lộ credential |
 | ARCH-09 | Mục 7 — Domain/TLS/Observability | Ảnh domain/HTTPS và CloudWatch dashboard/log group khi các hạng mục được triển khai | Xác nhận các quyết định hiện đang để trống | Hiện chưa cấu hình domain/HTTPS và CloudWatch |
+
+### 8.1. Ảnh minh chứng cần bổ sung trước khi kiểm tra lỗi health check port 80
+
+Production có hai lớp kiểm tra khác nhau:
+
+- Backend container kiểm tra trực tiếp `http://127.0.0.1:8000/api/v1/health` bên trong container. Port 8000 chỉ khai báo `expose`, không publish trực tiếp ra host.
+- GitHub Actions/CD và người vận hành trên EC2 kiểm tra qua Nginx frontend ở `http://127.0.0.1:80/api/v1/health` hoặc URL không ghi port tương đương.
+
+Trên EC2, chụp một ảnh terminal gồm các lệnh sau trước khi sửa cấu hình:
+
+```bash
+hostname
+uname -a
+docker --version
+docker compose version
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+sudo ss -lntp | grep -E ':80([[:space:]]|$)' || true
+curl -i --max-time 15 http://127.0.0.1:80/api/v1/health
+```
+
+Nếu lệnh qua port 80 lỗi, chụp thêm log Nginx/frontend và thông tin mapping port, không chụp secret:
+
+```bash
+FRONTEND_CONTAINER=$(docker ps -q --filter 'label=com.docker.compose.service=frontend' | head -n 1)
+BACKEND_CONTAINER=$(docker ps -q --filter 'label=com.docker.compose.service=backend' | head -n 1)
+
+docker inspect "$FRONTEND_CONTAINER" --format '{{json .NetworkSettings.Ports}}'
+docker logs --tail=200 "$FRONTEND_CONTAINER"
+docker logs --tail=200 "$BACKEND_CONTAINER"
+```
+
+Không kết luận backend hỏng chỉ vì `curl http://127.0.0.1:8000/api/v1/health` trên host thất bại; production compose không publish port backend ra host. Nếu cần kiểm tra backend trực tiếp, chạy trong container:
+
+```bash
+docker exec "$BACKEND_CONTAINER" python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health').read().decode())"
+```
+
+Ảnh evidence cần thể hiện rõ một trong các kết quả:
+
+- Backend container trả JSON `status=healthy`, nhưng port 80 lỗi: tập trung kiểm tra frontend/Nginx, mapping port và xung đột port trên EC2.
+- Backend container và port 80 đều lỗi: kiểm tra backend container, MongoDB/Atlas connection và startup log.
+- Cả hai đều trả HTTP 200: health check đã hoạt động; lưu ảnh kèm thời gian, commit/tag hoặc workflow run.
 
 ### Quy tắc lưu ảnh
 

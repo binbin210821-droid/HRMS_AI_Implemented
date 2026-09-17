@@ -341,6 +341,67 @@ async def test_apply_suggestion_writes_plan_audit_and_event():
 
 
 @pytest.mark.asyncio
+async def test_apply_rejects_target_at_capacity_after_long_running_tasks_are_counted():
+    department_id = ObjectId()
+    alert = make_alert(department_id)
+    candidate = WorkloadCandidateResponse(
+        employee_id=str(ObjectId()),
+        employee_code="KD-NV-002",
+        employee_name="Nhân viên nhận việc",
+        tasks_completed=2,
+        quality_score=90,
+        active_task_count=2,
+        active_task_titles=["Kế hoạch kéo dài", "Báo cáo tháng"],
+        workload_count=4,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await CoordinationService(FakeRepository(alert, candidate)).apply(
+            str(alert.id),
+            department_id,
+            str(ObjectId()),
+            ApplyCoordinationRequest(tasks_to_transfer=1),
+        )
+
+    assert error.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_apply_only_accepts_remaining_capacity_after_active_and_reserved_work():
+    department_id = ObjectId()
+    alert = make_alert(department_id)
+    candidate = WorkloadCandidateResponse(
+        employee_id=str(ObjectId()),
+        employee_code="KD-NV-002",
+        employee_name="Nhân viên nhận việc",
+        tasks_completed=2,
+        quality_score=90,
+        active_task_count=1,
+        reserved_coordination_count=0,
+        workload_count=3,
+    )
+    repository = FakeRepository(alert, candidate)
+    service = CoordinationService(repository)
+
+    with pytest.raises(HTTPException) as error:
+        await service.apply(
+            str(alert.id),
+            department_id,
+            str(ObjectId()),
+            ApplyCoordinationRequest(tasks_to_transfer=2),
+        )
+    assert error.value.status_code == 422
+
+    plan = await service.apply(
+        str(alert.id),
+        department_id,
+        str(ObjectId()),
+        ApplyCoordinationRequest(tasks_to_transfer=1),
+    )
+    assert plan.tasks_to_transfer == 1
+
+
+@pytest.mark.asyncio
 async def test_directive_response_includes_fulfilled_by_name_and_keeps_pending_null():
     department_id = ObjectId()
     alert = make_alert(department_id)

@@ -73,6 +73,20 @@ performance_score = quality_score × 0.7 + task_volume_score × 0.3
 quality_score do Manager đánh giá và tasks_completed là số công việc hoàn thành trong ngày.
 Các field kỹ thuật được chuyển sang nhãn tiếng Việt trước khi hiển thị cho người dùng.
 
+### Nguyên tắc tải khi điều phối
+
+- Tổng tải trong ngày = công việc hoàn thành trong ngày + công việc đang đảm nhiệm + công việc đã
+  giữ chỗ từ các phương án điều phối trước đó.
+- Task chưa hoàn thành được tính trên từng ngày từ ngày tạo đến hạn hoàn thành; task kéo dài nhiều
+  ngày vì vậy xuất hiện trong tải của tất cả các ngày ở giữa, không chỉ ngày đầu và ngày cuối.
+  Task quá hạn nhưng chưa hoàn thành tiếp tục được tính để tránh điều phối nhầm vào nhân viên đang
+  còn việc tồn.
+- Chỉ đề xuất nhân viên có tổng tải dưới sức chứa 4 công việc/ngày. Response cũng trả về số chỗ còn
+  nhận; giao diện giới hạn lựa chọn theo số chỗ này (tối đa 2 việc mỗi lần điều phối). Backend kiểm
+  tra lại sức chứa khi áp dụng, không tin dữ liệu cũ từ giao diện; nếu không còn chỗ, yêu cầu bị từ chối.
+- Gợi ý hiển thị số việc đang đảm nhiệm, tổng tải/ngày và tên các việc kéo dài để Manager có đủ
+  căn cứ trước khi xác nhận.
+
 ### Phân quyền
 
 | Quyền                                  |   Manager |         Leadership |
@@ -117,7 +131,7 @@ rate limiting, idempotency, EventBus, Change Streams và WebSocket.
 
 - /api/v1 là contract chuẩn được ưu tiên cho client mới.
 - /api là alias tương thích trong giai đoạn chuyển đổi.
-- /api/health và /api/v1/health là health check.
+- `/api/v1/health` là health check chuẩn production; `/api/health` vẫn là alias tương thích.
 - /docs và /redoc là tài liệu OpenAPI khi được bật trong môi trường tương ứng.
 
 Client mới không nên xây thêm caller dùng alias /api nếu endpoint /api/v1 đã tồn tại.
@@ -222,7 +236,7 @@ npm run dev -- --host 127.0.0.1 --port 5173
 Mở http://127.0.0.1:5173 trong trình duyệt. Kiểm tra API:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/health
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/health
 ```
 
 ### 5. Seed dữ liệu development
@@ -418,7 +432,7 @@ Kiểm tra sau mỗi lần deploy trên EC2:
 ```bash
 cd /opt/workmind
 docker ps
-curl --fail --max-time 15 http://127.0.0.1/api/health
+curl --fail --max-time 15 http://127.0.0.1/api/v1/health
 docker logs --tail=200 workmind-backend-1
 docker logs --tail=200 workmind-frontend-1
 ```
@@ -459,7 +473,7 @@ latency, MongoDB/Redis connection errors, S3 failures và ClamAV unavailable.
 ## Tài liệu liên quan
 
 - [CI/CD deployment guide](docs/deployment/ci-cd.md)
+- [Bộ tài liệu kỹ thuật tổng hợp](docs/technical/README.md)
 - [Environment template](.env.example)
 - [Backend tests](backend/tests)
 - [Frontend E2E tests](frontend/e2e)
-

@@ -5,6 +5,7 @@ from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 from app.core.time import BusinessClock
+from app.core.workload_policy import DAILY_WORKLOAD_CAPACITY
 from app.events.event_bus import OVERLOAD_DETECTED, EventBus, event_bus
 from app.models.employee import EmployeeDocument
 from app.models.overload import OverloadLogDocument, OverloadTriggerReason
@@ -15,7 +16,7 @@ from app.repositories.overload_repository import OverloadRepository
 class OverloadDetector:
     """Detects hard overload rules without creating alerts or using WebSockets."""
 
-    TASK_VOLUME_LIMIT = 4
+    TASK_VOLUME_LIMIT = DAILY_WORKLOAD_CAPACITY
     QUALITY_DROP_PERCENT = 20.0
     BASELINE_DAYS = 7
     QUALITY_WINDOW_DAYS = 3

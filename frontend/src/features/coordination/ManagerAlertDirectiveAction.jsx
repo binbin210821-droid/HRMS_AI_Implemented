@@ -18,6 +18,11 @@ import {
   getDirectiveStatusClass,
   getDirectiveStatusLabel,
 } from './directiveLabels.js'
+import {
+  formatActiveTaskTitles,
+  formatCandidateWorkload,
+  getCandidateTransferLimit,
+} from './workloadLabels.js'
 
 const FILTER_LABELS = {
   all: 'Tất cả',
@@ -80,7 +85,14 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
           setDirective({ type: 'coordination', data: selected })
           setCandidates(candidateData || [])
           setCandidateId(candidateData?.[0]?.employee_id || '')
-          setTasksToTransfer(String(selected.tasks_to_transfer || 1))
+          setTasksToTransfer(
+            String(
+              Math.min(
+                Number(selected.tasks_to_transfer) || 1,
+                getCandidateTransferLimit(candidateData?.[0]) || 1,
+              ),
+            ),
+          )
           setIsModalOpen(true)
           if (!idempotencyKeyRef.current) {
             idempotencyKeyRef.current = generateIdempotencyKey()
@@ -463,17 +475,35 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
                     className="form-input mt-1"
                     required
                     value={candidateId}
-                    onChange={(event) => setCandidateId(event.target.value)}
+                    onChange={(event) => {
+                      const candidate = candidates.find(
+                        (item) => item.employee_id === event.target.value,
+                      )
+                      const transferLimit = getCandidateTransferLimit(candidate)
+                      setCandidateId(event.target.value)
+                      setTasksToTransfer((current) =>
+                        String(Math.min(Number(current) || 1, transferLimit || 1)),
+                      )
+                    }}
                   >
                     <option value="">Chọn nhân viên</option>
                     {candidates.map((candidate) => (
                       <option key={candidate.employee_id} value={candidate.employee_id}>
-                        {candidate.employee_name} · {candidate.tasks_completed} công việc · chất
+                        {candidate.employee_name} · {formatCandidateWorkload(candidate)} · chất
                         lượng {candidate.quality_score}
                       </option>
                     ))}
                   </select>
                 </label>
+                {formatActiveTaskTitles(
+                  candidates.find((candidate) => candidate.employee_id === candidateId),
+                ) && (
+                  <p className="-mt-2 text-xs leading-5 text-slate-500">
+                    {formatActiveTaskTitles(
+                      candidates.find((candidate) => candidate.employee_id === candidateId),
+                    )}
+                  </p>
+                )}
                 <label className="block text-sm font-semibold text-slate-700">
                   Số công việc chuyển giao
                   <select
@@ -481,8 +511,18 @@ function ManagerAlertDirectiveAction({ onCompleted, alerts = [] }) {
                     value={tasksToTransfer}
                     onChange={(event) => setTasksToTransfer(event.target.value)}
                   >
-                    <option value="1">1 công việc</option>
-                    <option value="2">2 công việc</option>
+                    {Array.from(
+                      {
+                        length: getCandidateTransferLimit(
+                          candidates.find((candidate) => candidate.employee_id === candidateId),
+                        ),
+                      },
+                      (_, index) => index + 1,
+                    ).map((count) => (
+                      <option key={count} value={count}>
+                        {count} công việc
+                      </option>
+                    ))}
                   </select>
                 </label>
                 {candidates.length === 0 && (

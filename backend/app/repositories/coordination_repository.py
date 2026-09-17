@@ -1,5 +1,5 @@
 from datetime import date as Date
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 from bson import ObjectId
@@ -18,6 +18,7 @@ from app.models.department import DepartmentDocument
 from app.models.employee import EmployeeDocument
 from app.models.overload import WorkloadCandidateResponse
 from app.models.user import UserDocument
+from app.repositories.workload_candidate_query import build_rebalance_candidate_pipeline
 
 
 class CoordinationRepository:
@@ -27,6 +28,7 @@ class CoordinationRepository:
         self.client = database.client
         self.alerts = database["alerts"]
         self.metrics = database["performance_metrics"]
+        self.tasks = database["tasks"]
         self.employees = database["employees"]
         self.plans = database["coordination_plans"]
         self.directives = database["coordination_directives"]
@@ -38,6 +40,8 @@ class CoordinationRepository:
     async def ensure_indexes(self) -> None:
         await self.plans.create_index("alert_id", unique=True)
         await self.plans.create_index([("department_id", 1), ("created_at", -1)])
+        await self.plans.create_index([("target_employee_id", 1), ("alert_date", 1)])
+        await self.tasks.create_index([("employee_id", 1), ("status", 1), ("created_at", 1)])
         await self.directives.create_index([("target_department_id", 1), ("status", 1)])
         try:
             await self.department_directives.drop_index("target_department_id_1_status_1")
@@ -148,49 +152,13 @@ class CoordinationRepository:
         offset: int,
         limit: int,
     ) -> Page[WorkloadCandidateResponse]:
-        start = datetime.combine(metric_date, time.min, tzinfo=timezone.utc)
-        end = start + timedelta(days=1)
-        match: dict[str, Any] = {
-            "date": {"$gte": start, "$lt": end},
-            "tasks_completed": {"$lte": 2},
-            "quality_score": {"$gte": 80},
-            "employee_id": {"$ne": excluded_employee_id},
-        }
-        pipeline: list[dict[str, Any]] = [
-            {"$match": match},
-            {
-                "$lookup": {
-                    "from": "employees",
-                    "localField": "employee_id",
-                    "foreignField": "_id",
-                    "as": "employee",
-                }
-            },
-            {"$unwind": "$employee"},
-            {
-                "$match": {
-                    "employee.department_id": department_id,
-                    "employee.is_active": True,
-                }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "employee_id": {"$toString": "$employee_id"},
-                    "employee_code": "$employee.employee_code",
-                    "employee_name": "$employee.full_name",
-                    "tasks_completed": 1,
-                    "quality_score": 1,
-                }
-            },
-            {"$sort": {"tasks_completed": 1, "quality_score": -1}},
-            {
-                "$facet": {
-                    "metadata": [{"$count": "total"}],
-                    "items": [{"$skip": offset}, {"$limit": limit}],
-                }
-            },
-        ]
+        pipeline = build_rebalance_candidate_pipeline(
+            department_id,
+            metric_date,
+            excluded_employee_id,
+            offset=offset,
+            limit=limit,
+        )
         result = await self.metrics.aggregate(pipeline).to_list(1)
         payload = result[0] if result else {}
         metadata = payload.get("metadata") or []
@@ -211,44 +179,9 @@ class CoordinationRepository:
         metric_date: Date,
         excluded_employee_id: ObjectId | None = None,
     ) -> list[WorkloadCandidateResponse]:
-        start = datetime.combine(metric_date, time.min, tzinfo=timezone.utc)
-        end = start + timedelta(days=1)
-        match: dict[str, Any] = {
-            "date": {"$gte": start, "$lt": end},
-            "tasks_completed": {"$lte": 2},
-            "quality_score": {"$gte": 80},
-        }
-        if excluded_employee_id is not None:
-            match["employee_id"] = {"$ne": excluded_employee_id}
-        pipeline: list[dict[str, Any]] = [
-            {"$match": match},
-            {
-                "$lookup": {
-                    "from": "employees",
-                    "localField": "employee_id",
-                    "foreignField": "_id",
-                    "as": "employee",
-                }
-            },
-            {"$unwind": "$employee"},
-            {
-                "$match": {
-                    "employee.department_id": department_id,
-                    "employee.is_active": True,
-                }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "employee_id": {"$toString": "$employee_id"},
-                    "employee_code": "$employee.employee_code",
-                    "employee_name": "$employee.full_name",
-                    "tasks_completed": 1,
-                    "quality_score": 1,
-                }
-            },
-            {"$sort": {"tasks_completed": 1, "quality_score": -1}},
-        ]
+        pipeline = build_rebalance_candidate_pipeline(
+            department_id, metric_date, excluded_employee_id
+        )
         documents = await self.metrics.aggregate(pipeline).to_list(None)
         return [WorkloadCandidateResponse.model_validate(document) for document in documents]
 

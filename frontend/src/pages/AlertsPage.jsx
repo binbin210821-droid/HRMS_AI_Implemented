@@ -23,6 +23,11 @@ import {
 } from '../features/coordination/coordinationApi.js'
 import ManagerAlertDirectiveAction from '../features/coordination/ManagerAlertDirectiveAction.jsx'
 import { getDirectiveStatusLabel } from '../features/coordination/directiveLabels.js'
+import {
+  formatActiveTaskTitles,
+  formatCandidateWorkload,
+  getCandidateTransferLimit,
+} from '../features/coordination/workloadLabels.js'
 import { useAuthStore } from '../stores/authStore.js'
 import { generateIdempotencyKey } from '../utils/idempotency.js'
 import { useActionFeedback } from '../components/feedback/index.js'
@@ -884,20 +889,42 @@ function AlertsPage() {
                 className="mt-1"
                 value={coordinationForm.target_employee_id}
                 onChange={(event) =>
-                  setCoordinationForm((current) => ({
-                    ...current,
-                    target_employee_id: event.target.value,
-                  }))
+                  setCoordinationForm((current) => {
+                    const candidate = selectedCoordination.suggestion.candidates.find(
+                      (item) => item.employee_id === event.target.value,
+                    )
+                    const transferLimit = getCandidateTransferLimit(candidate)
+                    return {
+                      ...current,
+                      target_employee_id: event.target.value,
+                      tasks_to_transfer: String(
+                        Math.min(Number(current.tasks_to_transfer) || 1, transferLimit || 1),
+                      ),
+                    }
+                  })
                 }
               >
                 {selectedCoordination.suggestion.candidates.map((candidate) => (
                   <option key={candidate.employee_id} value={candidate.employee_id}>
-                    {candidate.employee_name} ({candidate.employee_code}) — đang có{' '}
-                    {candidate.tasks_completed} công việc
+                    {candidate.employee_name} ({candidate.employee_code}) —{' '}
+                    {formatCandidateWorkload(candidate)}
                   </option>
                 ))}
               </Select>
             </label>
+            {formatActiveTaskTitles(
+              selectedCoordination.suggestion.candidates.find(
+                (candidate) => candidate.employee_id === coordinationForm.target_employee_id,
+              ),
+            ) && (
+              <p className="-mt-2 text-xs leading-5 text-slate-500">
+                {formatActiveTaskTitles(
+                  selectedCoordination.suggestion.candidates.find(
+                    (candidate) => candidate.employee_id === coordinationForm.target_employee_id,
+                  ),
+                )}
+              </p>
+            )}
             <label className="block text-sm font-medium text-slate-700">
               Số công việc điều phối
               <Select
@@ -910,8 +937,21 @@ function AlertsPage() {
                   }))
                 }
               >
-                <option value="1">1 công việc</option>
-                <option value="2">2 công việc</option>
+                {Array.from(
+                  {
+                    length: getCandidateTransferLimit(
+                      selectedCoordination.suggestion.candidates.find(
+                        (candidate) =>
+                          candidate.employee_id === coordinationForm.target_employee_id,
+                      ),
+                    ),
+                  },
+                  (_, index) => index + 1,
+                ).map((count) => (
+                  <option key={count} value={count}>
+                    {count} công việc
+                  </option>
+                ))}
               </Select>
             </label>
             <label className="block text-sm font-medium text-slate-700">
@@ -1707,10 +1747,15 @@ function AlertCard({
             <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 p-3">
               <p className="text-sm font-semibold text-sky-900">Gợi ý điều phối trong phòng</p>
               <p className="mt-1 text-sm text-sky-800">
-                Có thể chuyển việc cho {coordination.candidates[0].employee_name} — đang có{' '}
-                {coordination.candidates[0].tasks_completed} công việc và điểm chất lượng{' '}
+                Có thể chuyển việc cho {coordination.candidates[0].employee_name} —{' '}
+                {formatCandidateWorkload(coordination.candidates[0])} và điểm chất lượng{' '}
                 {coordination.candidates[0].quality_score}.
               </p>
+              {formatActiveTaskTitles(coordination.candidates[0]) && (
+                <p className="mt-2 text-xs text-sky-700">
+                  {formatActiveTaskTitles(coordination.candidates[0])}
+                </p>
+              )}
               <div className="mt-3 flex flex-wrap gap-2">
                 <button type="button" className="primary-button" onClick={onApplyCoordination}>
                   Áp dụng gợi ý điều phối

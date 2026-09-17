@@ -251,7 +251,9 @@ class AppendDuplicateTaskRepository(FakeTaskRepository):
 
 
 def task_request(
-    employee_id: ObjectId, title: str = "Chuẩn bị báo cáo", due_date: date | None = None
+    employee_id: ObjectId,
+    title: str = "Chuẩn bị báo cáo",
+    due_date: date | None = None,
 ) -> TaskCreate:
     return TaskCreate(
         title=title,

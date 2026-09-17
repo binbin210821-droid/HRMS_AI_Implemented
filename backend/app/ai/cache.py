@@ -41,6 +41,10 @@ class AiProposalCache:
                     "employee_id": candidate.employee_id,
                     "tasks_completed": candidate.tasks_completed,
                     "quality_score": candidate.quality_score,
+                    "active_task_count": candidate.active_task_count,
+                    "reserved_coordination_count": candidate.reserved_coordination_count,
+                    "workload_count": candidate.workload_count,
+                    "available_capacity": candidate.available_capacity,
                 }
                 for candidate in candidates
             ],

@@ -1,7 +1,10 @@
+from app.core.workload_policy import DAILY_WORKLOAD_CAPACITY
+
+
 class PerformanceScoreCalculator:
     """Bộ tính điểm thuần toán học, không phụ thuộc database hay framework."""
 
-    STANDARD_DAILY_TASKS = 4
+    STANDARD_DAILY_TASKS = DAILY_WORKLOAD_CAPACITY
     MAX_TASK_VOLUME_MULTIPLIER = 1.5
     MAX_SCORE = 100.0
 

@@ -930,6 +930,11 @@ class AiService:
                 "Tên nhân viên": candidate.employee_name,
                 "Mã nhân viên hiển thị": candidate.employee_code,
                 "Số công việc hoàn thành": candidate.tasks_completed,
+                "Số công việc đang đảm nhiệm trong ngày": candidate.active_task_count,
+                "Số công việc đã giữ chỗ từ điều phối": candidate.reserved_coordination_count,
+                "Tổng khối lượng công việc trong ngày": candidate.workload_count,
+                "Khả năng nhận thêm trong ngày": candidate.available_capacity,
+                "Tên công việc đang đảm nhiệm": candidate.active_task_titles,
                 "Điểm chất lượng công việc": candidate.quality_score,
             }
             for candidate in candidates

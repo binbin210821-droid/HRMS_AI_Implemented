@@ -12,6 +12,11 @@ import {
   writeAiSuggestion,
 } from '../ai/aiSuggestionStorage.js'
 import { applyCoordination } from '../coordination/coordinationApi.js'
+import {
+  formatActiveTaskTitles,
+  formatCandidateWorkload,
+  getCandidateTransferLimit,
+} from '../coordination/workloadLabels.js'
 import { resolveAlert } from './alertsApi.js'
 import { generateIdempotencyKey } from '../../utils/idempotency.js'
 
@@ -86,6 +91,8 @@ function AiAlertProposalCard({ alert, coordination, role, onResolved, onCoordina
     const targetCandidate = coordination?.candidates?.find(
       (candidate) => candidate.employee_id === action.target_employee_id,
     )
+    const transferLimit = getCandidateTransferLimit(targetCandidate)
+    const transferCount = Math.min(Number(action.tasks_to_transfer) || 1, transferLimit || 1)
     const confirmed = await confirmAction({
       title:
         action.type === 'resolve_alert'
@@ -102,7 +109,7 @@ function AiAlertProposalCard({ alert, coordination, role, onResolved, onCoordina
           : [
               `Cảnh báo: ${alert.title}`,
               `Nhân viên nhận việc: ${targetCandidate?.employee_name || 'Nhân viên đã chọn'}`,
-              `Số công việc chuyển: ${Number(action.tasks_to_transfer) || 1}`,
+              `Số công việc chuyển: ${transferCount}`,
               `Ghi chú: ${action.note?.trim() || 'Không thêm ghi chú'}`,
             ],
       confirmLabel: 'Xác nhận áp dụng',
@@ -125,7 +132,7 @@ function AiAlertProposalCard({ alert, coordination, role, onResolved, onCoordina
           alert.id,
           {
             target_employee_id: action.target_employee_id,
-            tasks_to_transfer: Number(action.tasks_to_transfer),
+            tasks_to_transfer: transferCount,
             note: action.note || '',
           },
           generateIdempotencyKey(),
@@ -188,6 +195,14 @@ function AiAlertProposalCard({ alert, coordination, role, onResolved, onCoordina
                   <StaggerList className="mt-3 space-y-3">
                     {visibleActions.map((action) => {
                       const index = proposal.actions.indexOf(action)
+                      const targetCandidate = candidates.find(
+                        (candidate) => candidate.employee_id === action.target_employee_id,
+                      )
+                      const transferLimit = getCandidateTransferLimit(targetCandidate)
+                      const transferCount = Math.min(
+                        Number(action.tasks_to_transfer) || 1,
+                        transferLimit || 1,
+                      )
                       return (
                         <div
                           key={`${action.type}-${index}`}
@@ -245,34 +260,57 @@ function AiAlertProposalCard({ alert, coordination, role, onResolved, onCoordina
                                 <select
                                   className="form-input mt-1"
                                   value={action.target_employee_id}
-                                  onChange={(event) =>
-                                    updateAction(index, { target_employee_id: event.target.value })
-                                  }
+                                  onChange={(event) => {
+                                    const candidate = candidates.find(
+                                      (item) => item.employee_id === event.target.value,
+                                    )
+                                    const nextTransferLimit = getCandidateTransferLimit(candidate)
+                                    updateAction(index, {
+                                      target_employee_id: event.target.value,
+                                      tasks_to_transfer: Math.min(
+                                        Number(action.tasks_to_transfer) || 1,
+                                        nextTransferLimit || 1,
+                                      ),
+                                    })
+                                  }}
                                 >
                                   {candidates.map((candidate) => (
                                     <option
                                       key={candidate.employee_id}
                                       value={candidate.employee_id}
                                     >
-                                      {candidate.employee_name} ({candidate.employee_code}) — đang
-                                      có {candidate.tasks_completed} công việc
+                                      {candidate.employee_name} ({candidate.employee_code}) —{' '}
+                                      {formatCandidateWorkload(candidate)}
                                     </option>
                                   ))}
                                 </select>
                               </label>
+                              {formatActiveTaskTitles(targetCandidate) && (
+                                <p className="mt-2 text-xs text-slate-600">
+                                  {formatActiveTaskTitles(targetCandidate)}
+                                </p>
+                              )}
                               <label className="mt-3 block text-sm font-medium text-slate-700">
                                 Số công việc điều phối
                                 <select
                                   className="form-input mt-1"
-                                  value={String(action.tasks_to_transfer)}
+                                  value={String(transferCount)}
                                   onChange={(event) =>
                                     updateAction(index, {
                                       tasks_to_transfer: Number(event.target.value),
                                     })
                                   }
                                 >
-                                  <option value="1">1 công việc</option>
-                                  <option value="2">2 công việc</option>
+                                  {Array.from(
+                                    {
+                                      length: getCandidateTransferLimit(targetCandidate),
+                                    },
+                                    (_, optionIndex) => optionIndex + 1,
+                                  ).map((count) => (
+                                    <option key={count} value={count}>
+                                      {count} công việc
+                                    </option>
+                                  ))}
                                 </select>
                               </label>
                               <label className="mt-3 block text-sm font-medium text-slate-700">

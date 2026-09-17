@@ -5,6 +5,7 @@ import { FadeIn, StaggerList } from '../../components/animations/index.js'
 import { REALTIME_COALESCE_DELAY, useRealtimeUpdates } from '../../hooks/useRealtimeUpdates.js'
 import { listCoordinationSuggestions } from '../coordination/coordinationApi.js'
 import { DIRECTIVE_SOURCE_LABELS } from '../coordination/directiveLabels.js'
+import { formatActiveTaskTitles, formatCandidateWorkload } from '../coordination/workloadLabels.js'
 
 const ALERT_TYPE_LABELS = {
   early_warning: 'Dấu hiệu sớm',
@@ -99,9 +100,14 @@ function CoordinationSuggestionsCard({ role }) {
                   <p className="mt-3 font-bold text-slate-900">{suggestion.source_employee_name}</p>
                   <p className="mt-1 text-sm leading-6 text-slate-600">
                     Có thể phân bớt việc sang {candidate.employee_name} ({candidate.employee_code}),
-                    hiện đang hoàn thành {candidate.tasks_completed} công việc với chất lượng{' '}
+                    {` ${formatCandidateWorkload(candidate)}`} với chất lượng{' '}
                     {candidate.quality_score} điểm.
                   </p>
+                  {formatActiveTaskTitles(candidate) && (
+                    <p className="mt-2 text-xs leading-5 text-slate-500">
+                      {formatActiveTaskTitles(candidate)}
+                    </p>
+                  )}
                   <button
                     type="button"
                     className="mt-3 text-sm font-semibold text-brand-700 hover:text-brand-900"

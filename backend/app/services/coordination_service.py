@@ -11,6 +11,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from app.core.config import get_settings
 from app.core.pagination import Page
 from app.core.time import BusinessClock
+from app.core.workload_policy import DAILY_WORKLOAD_CAPACITY
 from app.events.event_bus import COORDINATION_APPLIED, EventBus, event_bus
 from app.models.alert import AlertDocument
 from app.models.coordination import (
@@ -131,7 +132,7 @@ class CoordinationService:
                 detail="Nhân viên nhận việc không còn phù hợp hoặc không thuộc phòng ban",
             )
 
-        available_capacity = max(0, 4 - target.tasks_completed)
+        available_capacity = max(0, DAILY_WORKLOAD_CAPACITY - self._candidate_workload(target))
         transfer_count = request.tasks_to_transfer or min(2, available_capacity)
         if transfer_count < 1 or transfer_count > available_capacity:
             raise HTTPException(
@@ -388,7 +389,7 @@ class CoordinationService:
                 detail="Nhân viên nhận việc không còn phù hợp hoặc không thuộc phòng ban đích",
             )
 
-        available_capacity = max(0, 4 - target.tasks_completed)
+        available_capacity = max(0, DAILY_WORKLOAD_CAPACITY - self._candidate_workload(target))
         transfer_count = request.tasks_to_transfer or min(2, available_capacity)
         if transfer_count < 1 or transfer_count > available_capacity:
             raise HTTPException(
@@ -1084,15 +1085,31 @@ class CoordinationService:
         candidates: list[WorkloadCandidateResponse], target_employee_id: str | None
     ) -> WorkloadCandidateResponse | None:
         if target_employee_id is None:
-            return candidates[0] if candidates else None
-        try:
-            return next(
-                candidate
-                for candidate in candidates
-                if candidate.employee_id == str(ObjectId(target_employee_id))
-            )
-        except (InvalidId, StopIteration):
+            candidate = candidates[0] if candidates else None
+        else:
+            try:
+                candidate = next(
+                    candidate
+                    for candidate in candidates
+                    if candidate.employee_id == str(ObjectId(target_employee_id))
+                )
+            except (InvalidId, StopIteration):
+                candidate = None
+        if candidate is None or (
+            CoordinationService._candidate_workload(candidate) >= DAILY_WORKLOAD_CAPACITY
+        ):
             return None
+        return candidate
+
+    @staticmethod
+    def _candidate_workload(candidate: WorkloadCandidateResponse) -> int:
+        if candidate.workload_count is not None:
+            return candidate.workload_count
+        return (
+            candidate.tasks_completed
+            + candidate.active_task_count
+            + candidate.reserved_coordination_count
+        )
 
     def _alert_date(self, alert) -> Any:
         if alert.detected_dates:

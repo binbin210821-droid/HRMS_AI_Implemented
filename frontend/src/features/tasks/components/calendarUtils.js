@@ -47,8 +47,15 @@ export function getTaskDateKey(task) {
 
 export function groupTasksByDate(tasks) {
   return tasks.reduce((groups, task) => {
-    const key = getTaskDateKey(task)
-    groups[key] = groups[key] ? [...groups[key], task] : [task]
+    const start = parseCalendarDate(task.created_at || task.due_date)
+    const end = parseCalendarDate(task.due_date)
+    const firstDate = start <= end ? start : end
+    const lastDate = start <= end ? end : start
+
+    for (let date = firstDate; date <= lastDate; date = addDays(date, 1)) {
+      const key = toDateKey(date)
+      groups[key] = groups[key] ? [...groups[key], task] : [task]
+    }
     return groups
   }, {})
 }

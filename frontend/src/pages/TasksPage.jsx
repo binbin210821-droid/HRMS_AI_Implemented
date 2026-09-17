@@ -191,6 +191,7 @@ function ManagerTasksPage() {
       department_id: data.department_id || employee.department_id,
       priority: data.priority || 'medium',
       status,
+      created_at: data.created_at || new Date().toISOString(),
       due_date: toDateOnly(data.due_date),
       is_overdue: status !== 'done' && isPastDate(data.due_date),
       completed_at: data.completed_at || null,
@@ -209,7 +210,11 @@ function ManagerTasksPage() {
   }, [])
 
   function openCreate(dueDate = '') {
-    setForm({ ...emptyForm, employee_id: employees[0]?.id || '', due_date: dueDate })
+    setForm({
+      ...emptyForm,
+      employee_id: employees[0]?.id || '',
+      due_date: dueDate || toDateOnly(new Date()),
+    })
     setModal({ mode: 'create' })
     setError('')
   }
